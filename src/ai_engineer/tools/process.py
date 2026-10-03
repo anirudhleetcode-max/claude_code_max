@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import codecs
 import collections
 import contextlib
 import os
@@ -74,6 +75,10 @@ class CommandOutcome:
     @property
     def ok(self) -> bool:
         return self.exit_code == 0 and not self.timed_out and not self.cancelled
+
+
+def _utf8_decoder() -> codecs.IncrementalDecoder:
+    return codecs.getincrementaldecoder("utf-8")(errors="replace")
 
 
 class _BoundedBuffer:
@@ -208,11 +213,13 @@ async def run_shell(
 
     async def pump() -> None:
         assert proc.stdout is not None
+        decoder = _utf8_decoder()  # a character split across two reads must not become U+FFFD
         while True:
             chunk = await proc.stdout.read(65536)
             if not chunk:
                 break
-            buffer.write(chunk.decode("utf-8", errors="replace"))
+            buffer.write(decoder.decode(chunk))
+        buffer.write(decoder.decode(b"", final=True))
 
     pump_task = asyncio.ensure_future(pump())
     wait_task = asyncio.ensure_future(proc.wait())
@@ -298,11 +305,13 @@ class ProcessManager:
 
         async def pump() -> None:
             assert proc.stdout is not None
+            decoder = _utf8_decoder()
             while True:
                 chunk = await proc.stdout.read(65536)
                 if not chunk:
                     break
-                bp.buffer.write(chunk.decode("utf-8", errors="replace"))
+                bp.buffer.write(decoder.decode(chunk))
+            bp.buffer.write(decoder.decode(b"", final=True))
             await proc.wait()
             bp.ended = time.monotonic()
 

@@ -81,3 +81,42 @@ All notable changes to this project are documented here. The format follows
   now cancels it immediately.
 - Task events are returned in emission order (events emitted within the same
   millisecond could appear out of order).
+
+### Correctness fixes (found by the final audit)
+- A hang or crash the agent introduced was excused as a "pre-existing" failure
+  when the baseline had an unrelated failing test. The broken code was then
+  committed without repair. A change of status (failed → timeout or crash) is now
+  always a new failure.
+- Edits made by the documentation stage ran after final validation and review. The
+  docs stage now runs first, so its edits are validated, reviewed and scanned.
+- A deleted test file was not flagged in subtask reviews.
+- Resuming an interrupted subtask skipped the implementer, and a loop that never
+  finished passed the implementation gate. The implementer now continues from the
+  current state, and an unfinished loop never counts as done.
+- `aie plan` switched branches, and a later resume could commit onto whatever
+  branch was checked out, including the user's own edits. Branch setup now happens
+  when execution starts, and commits happen only on the task branch.
+- In non-git workspaces, edits made after a resume were neither tracked nor
+  reversible.
+- One Ctrl+C did not stop `aie daemon`.
+- The agent loop reset its context on every step when the fresh context alone
+  exceeded the budget. The text-only nudge limit also counted across the whole
+  session.
+- The reviewer's explicit `request_changes` verdict was discarded when it reported
+  no blocking issue.
+- Context-length, invalid-request, refusal and malformed-output errors tripped the
+  circuit breaker shared by all roles.
+- Pre-existing dependency advisories always failed the security gate. The
+  dependency audit now has a baseline.
+- With `on_questions = "block"`, a task could never be completed. Questions are
+  now kept, and answers are accepted with `aie resume --answer` or interactively.
+- Opening another runtime marked a live subtask INTERRUPTED.
+- A stale stop request stopped the next run.
+- A cancelled run stayed RUNNING with its lease held.
+- A unique task-id prefix failed for tasks that have subtasks.
+- Multi-byte UTF-8 characters split across output chunks were garbled.
+- Final-QA repairs were never committed. A lost lease went unnoticed.
+- Cancelling during a check marked the task FAILED instead of INTERRUPTED.
+- Two daemons racing for one task crashed the loser.
+- Queued tasks whose dependency failed waited forever. They are now BLOCKED with
+  the reason.

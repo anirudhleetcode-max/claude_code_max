@@ -79,8 +79,15 @@ class CheckpointManager:
         return data
 
     def _backup_hook(self, rel: str, original: bytes | None) -> None:
-        if self.git is not None or self._epoch is None:
+        if self.git is not None:
             return
+        if self._epoch is None:
+            # a new process (e.g. a resumed task) keeps backing up into the latest epoch, so its
+            # writes stay visible to diffs and reversible by restores
+            latest = self.store.latest_checkpoint("files")
+            if latest is None or not (self.dir / latest.id).is_dir():
+                return
+            self._epoch = latest.id
         manifest = self._load_manifest(self._epoch)
         if rel in manifest:
             return

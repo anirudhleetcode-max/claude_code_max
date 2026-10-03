@@ -200,7 +200,11 @@ class StateStore:
         task = self.get_task(task_id)
         if task is None:
             # allow unique prefixes for convenience in the CLI
-            rows = self._exec("SELECT id FROM tasks WHERE id LIKE ?", (task_id + "%",)).fetchall()
+            # top-level tasks only (subtask rows are "<id>:<sub>"), with LIKE wildcards escaped
+            escaped = task_id.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+            rows = self._exec(
+                "SELECT id FROM tasks WHERE id LIKE ? ESCAPE '\\' AND parent_id IS NULL", (escaped + "%",)
+            ).fetchall()
             if len(rows) == 1:
                 task = self.get_task(rows[0][0])
         if task is None:
@@ -250,14 +254,22 @@ class StateStore:
         return [self._row_to_task(r) for r in rows]
 
     def next_queued(self) -> Task | None:
-        """Highest-priority queued top-level task whose dependencies are complete."""
+        """Highest-priority queued top-level task whose dependencies are complete.
+
+        Queued tasks whose dependencies failed, were cancelled or no longer exist can never run:
+        they are marked BLOCKED (with the reason) instead of waiting forever.
+        """
         rows = self._exec(
             "SELECT * FROM tasks WHERE status = ? AND parent_id IS NULL ORDER BY priority, created", (TaskStatus.QUEUED.value,)
         ).fetchall()
         for row in rows:
             task = self._row_to_task(row)
-            deps = [self.get_task(d) for d in task.depends_on]
-            if all(d is not None and d.status in (TaskStatus.COMPLETED, TaskStatus.COMPLETED_UNVERIFIED) for d in deps):
+            deps = {d: self.get_task(d) for d in task.depends_on}
+            dead = [d if t is None else f"{d} ({t.status})" for d, t in deps.items() if t is None or t.status in (TaskStatus.FAILED, TaskStatus.CANCELLED)]
+            if dead:
+                self.update_task(task.id, status=TaskStatus.BLOCKED, error="dependency cannot complete: " + ", ".join(dead))
+                continue
+            if all(t is not None and t.status in (TaskStatus.COMPLETED, TaskStatus.COMPLETED_UNVERIFIED) for t in deps.values()):
                 return task
         return None
 
@@ -279,23 +291,35 @@ class StateStore:
         self._exec("UPDATE tasks SET lease_owner = NULL, lease_expires = NULL WHERE id = ? AND lease_owner = ?", (task_id, owner))
 
     def recover_interrupted(self) -> list[Task]:
-        """Mark RUNNING tasks whose owner is gone (expired lease or dead local pid) as INTERRUPTED."""
+        """Mark RUNNING tasks whose owner is gone (expired lease or dead local pid) as INTERRUPTED.
+
+        Subtask rows carry no lease of their own: they are alive exactly while their parent is.
+        """
         recovered = []
         now = time.time()
         host = socket.gethostname()
-        for task in self.list_tasks(status=[TaskStatus.RUNNING], limit=1000):
-            dead = task.lease_expires is None or task.lease_expires < now
-            if not dead and task.lease_owner:
-                owner_host, _, rest = task.lease_owner.partition(":")
-                pid_text = rest.split(":", 1)[0]
-                if owner_host == host and pid_text.isdigit() and not _pid_alive(int(pid_text)):
-                    dead = True
+        running = self.list_tasks(status=[TaskStatus.RUNNING], limit=1000)
+        for task in sorted(running, key=lambda t: t.parent_id is not None):  # parents first
+            if task.parent_id is not None:
+                parent = self.get_task(task.parent_id)
+                dead = parent is None or parent.status != TaskStatus.RUNNING
+            else:
+                dead = task.lease_expires is None or task.lease_expires < now
+                if not dead and task.lease_owner:
+                    owner_host, _, rest = task.lease_owner.partition(":")
+                    pid_text = rest.split(":", 1)[0]
+                    if owner_host == host and pid_text.isdigit() and not _pid_alive(int(pid_text)):
+                        dead = True
             if dead:
                 recovered.append(
                     self.update_task(task.id, status=TaskStatus.INTERRUPTED, lease_owner=None, lease_expires=None,
                                      error=(task.error or "") + " [interrupted: agent process stopped unexpectedly]")
                 )
         return recovered
+
+    def clear_control(self, task_id: str) -> None:
+        """Drop stop/cancel requests addressed to an earlier run of ``task_id``."""
+        self._exec("DELETE FROM control WHERE task_id = ?", (task_id,))
 
     # ---- control (stop requests from other processes) -------------------------------------
 
@@ -390,6 +414,10 @@ class StateStore:
         else:
             rows = self._exec("SELECT * FROM checkpoints ORDER BY created DESC, id DESC LIMIT ?", (limit,)).fetchall()
         return [self._row_to_cp(r) for r in rows]
+
+    def latest_checkpoint(self, kind: str) -> CheckpointRecord | None:
+        row = self._exec("SELECT * FROM checkpoints WHERE kind = ? ORDER BY rowid DESC LIMIT 1", (kind,)).fetchone()
+        return self._row_to_cp(row) if row else None
 
     def last_verified_checkpoint(self, task_id: str) -> CheckpointRecord | None:
         row = self._exec(

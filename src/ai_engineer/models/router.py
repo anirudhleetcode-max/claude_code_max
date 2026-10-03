@@ -197,7 +197,8 @@ class FallbackModel:
                         )
                         await self._sleep_cancellable(delay, cancel)
                         continue
-                    self.breaker.record_failure(key)
+                    if exc.unhealthy:
+                        self.breaker.record_failure(key)
                     attempts.append(f"{key}: {type(exc).__name__}: {str(exc)[:200]}")
                     if not exc.fallback:
                         raise

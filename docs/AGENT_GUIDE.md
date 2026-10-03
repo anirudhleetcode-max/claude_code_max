@@ -55,9 +55,25 @@ orchestrator runs itself.
 ## Stopping, resuming and rolling back
 
 - **Ctrl+C** stops after the current step; state is saved. A second Ctrl+C exits immediately.
+  Under `aie daemon`, one Ctrl+C interrupts the running task and stops the daemon;
+  queued tasks stay queued.
 - `aie tasks stop <id>` / `aie tasks cancel <id>` from another terminal (or the dashboard).
+  Stopping also interrupts a model request that is in flight.
 - `aie resume [<id>]` continues from the last persisted stage. An interrupted
-  subtask whose changes are already on disk is **re-validated**, never assumed done.
+  subtask is never assumed done: the implementer continues from what is on disk
+  (it is told which files already changed), and everything is validated and
+  reviewed again.
+- **Questions.** With `[agent] on_questions = "block"`, a task whose request is
+  ambiguous stops as `BLOCKED` and lists its questions. Answer them with
+  `aie resume <id> --answer "..."` (once per question, in order) or resume in an
+  interactive terminal or the dashboard. The original triage is kept. With the default
+  `"ask"`, questions are asked interactively when someone is attached. Otherwise they
+  are recorded as assumptions.
+- **Branches.** `aie plan` never touches git. When execution starts on a clean
+  repository, the agent creates its own branch and commits verified subtasks there.
+  If a different branch is checked out when a commit is due (for example after you
+  switched branches before `aie resume`), auto-commit turns off and changes are left
+  uncommitted.
 - `aie checkpoints list --task <id>` / `aie checkpoints diff <id>` /
   `aie checkpoints restore <id>`. Every restore first snapshots the current state,
   so it can be undone with the checkpoint id it prints.

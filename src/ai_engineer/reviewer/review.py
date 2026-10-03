@@ -175,7 +175,9 @@ def combine(deterministic: list[ReviewIssue], model_result: ReviewResult | None,
         summary_parts.append(note)
     blocking = [i for i in issues if i.severity in ("blocker", "major")]
     unmet = [c for c in requirements if c.status == "unmet"]
-    verdict: Literal["approve", "request_changes"] = "request_changes" if blocking or unmet else "approve"
+    # the reviewer's explicit request for changes stands even when it reports no blocking issue
+    model_rejects = model_result is not None and model_result.verdict == "request_changes"
+    verdict: Literal["approve", "request_changes"] = "request_changes" if blocking or unmet or model_rejects else "approve"
     if not summary_parts:
         summary_parts.append("automated checks only")
     return ReviewResult(verdict=verdict, summary=" ".join(summary_parts), issues=issues, requirements=requirements, source=source, model=model_ref)

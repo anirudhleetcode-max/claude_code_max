@@ -30,6 +30,9 @@ class ProviderError(AIEngineerError):
     retryable: bool = False
     # Whether the router should try the next model in the chain after this error.
     fallback: bool = True
+    # Whether the error says the model/endpoint itself is unhealthy (counts toward its circuit
+    # breaker). Request-specific problems (too long, invalid, refused, unparsable) do not.
+    unhealthy: bool = True
 
     def __init__(self, message: str, *, provider: str = "", model: str = "", status: int | None = None):
         super().__init__(message)
@@ -67,6 +70,8 @@ class AuthenticationError(ProviderError):
 class InvalidRequestError(ProviderError):
     """The provider rejected the request as malformed (HTTP 400/404/422)."""
 
+    unhealthy = False
+
 
 class ContextLengthError(InvalidRequestError):
     """The request exceeded the model's context window."""
@@ -77,15 +82,20 @@ class ContextLengthError(InvalidRequestError):
 class RefusalError(ProviderError):
     """The model declined the request."""
 
+    unhealthy = False
+
 
 class CapabilityNotSupported(ProviderError):
     """The provider or model does not support the requested capability."""
 
     fallback = True
+    unhealthy = False
 
 
 class MalformedOutputError(ProviderError):
     """The model output could not be parsed or validated."""
+
+    unhealthy = False
 
 
 class AllModelsFailedError(ProviderError):

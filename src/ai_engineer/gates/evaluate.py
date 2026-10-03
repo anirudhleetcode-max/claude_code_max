@@ -109,13 +109,17 @@ def compare_with_baseline(current: Any, baseline: Any, in_scope_tests: set[str] 
     """
     if baseline is None or baseline.ok() or baseline.status in ("unavailable", "skipped"):
         return False, sorted(failure_keys(current))
+    if current.status != baseline.status:
+        # e.g. the suite used to fail and now hangs (timeout) or crashes: never "pre-existing"
+        return False, [f"(status changed from {baseline.status} to {current.status})", *sorted(failure_keys(current))]
     cur = failure_keys(current)
     base_entries = failure_entries(baseline)
     if in_scope_tests:
         scope = {t.replace("\\", "/") for t in in_scope_tests}
         base_entries = {k: f for k, f in base_entries.items() if not (k.startswith("test:") and any(f == t or f.endswith("/" + t) or t.endswith("/" + f) for t in scope))}
     base = set(base_entries)
-    if not cur and not base:
+    if not cur:
+        # nothing parsed from the current output: only identical output counts as the old failure
         same = current.signature() == baseline.signature()
         return same, [] if same else ["(unstructured output differs from baseline)"]
     new = cur - base
@@ -201,6 +205,8 @@ def evaluate_gates(settings: GatesSettings, inputs: GateInputs) -> GateReport:
         unmet = [c for c in r.requirements if c.status == "unmet"]
         if unmet:
             return GateResult(name="review", mode=mode, status=GateStatus.FAILED, detail=f"{len(unmet)} acceptance criterion/criteria unmet", evidence=[c.criterion for c in unmet])
+        if getattr(r, "verdict", "approve") == "request_changes":
+            return GateResult(name="review", mode=mode, status=GateStatus.FAILED, detail=f"the reviewer requested changes: {r.summary[:300]}", evidence=evidence)
         minor = len(r.issues)
         if r.source == "deterministic-only":
             status = GateStatus.UNVERIFIED if mode == GateMode.REQUIRED else GateStatus.SKIPPED

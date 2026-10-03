@@ -81,12 +81,14 @@ def _attach_renderer(rt: Any, args: argparse.Namespace) -> None:
     rt.bus.subscribe(TerminalRenderer(verbose=getattr(args, "verbose", False)))
 
 
-def _install_stop_handler(rt: Any) -> None:
+def _install_stop_handler(rt: Any, daemon_stop: asyncio.Event | None = None) -> None:
     loop = asyncio.get_running_loop()
     presses = {"n": 0}
 
     def handler() -> None:
         presses["n"] += 1
+        if daemon_stop is not None:
+            daemon_stop.set()  # the daemon exits once the current task has stopped
         if presses["n"] == 1:
             _err("\n  ■ Stopping after the current step (state is saved; resume with `aie resume`). Press Ctrl+C again to force quit.")
             rt.tool_ctx.cancel.cancel("stop requested (Ctrl+C)")
@@ -100,8 +102,8 @@ def _install_stop_handler(rt: Any) -> None:
         loop.add_signal_handler(signal.SIGINT, handler)
 
 
-async def _execute(rt: Any, task_id: str, args: argparse.Namespace, stop_after: str | None = None) -> int:
-    _install_stop_handler(rt)
+async def _execute(rt: Any, task_id: str, args: argparse.Namespace, stop_after: str | None = None, daemon_stop: asyncio.Event | None = None) -> int:
+    _install_stop_handler(rt, daemon_stop)
     try:
         task = await rt.orchestrator.run(task_id, stop_after=stop_after)
     finally:
@@ -195,6 +197,11 @@ def cmd_resume(args: argparse.Namespace) -> int:
         task = rt.store.require_task(task_id)
         if task.status == TaskStatus.FAILED:
             rt.store.update_task(task.id, status=TaskStatus.INTERRUPTED)
+        if getattr(args, "answer", None):
+            # answers to the questions a blocked task is waiting on, in order
+            state = dict(task.state or {})
+            state["supplied_answers"] = list(args.answer)
+            rt.store.update_task(task.id, state=state)
         _attach_renderer(rt, args)
         return await _execute(rt, task.id, args)
 
@@ -249,7 +256,16 @@ async def _run_queue(args: argparse.Namespace, once: bool) -> int:
     from ..runtime import Runtime
 
     code = 0
-    while True:
+    stop = asyncio.Event()
+    loop = asyncio.get_running_loop()
+
+    def idle_handler() -> None:
+        _err("\n  ■ Daemon stopping.")
+        stop.set()
+
+    while not stop.is_set():
+        with contextlib.suppress(NotImplementedError, RuntimeError):
+            loop.add_signal_handler(signal.SIGINT, idle_handler)  # replaced by the per-task handler while a task runs
         rt = Runtime.open(_workspace(args), _overrides(args))
         for sched in rt.store.due_schedules():
             task = rt.create_task(sched.description, queue=True)
@@ -260,10 +276,15 @@ async def _run_queue(args: argparse.Namespace, once: bool) -> int:
             await rt.aclose()
             if once:
                 return code
-            await asyncio.sleep(args.interval)
+            with contextlib.suppress(asyncio.TimeoutError):
+                await asyncio.wait_for(stop.wait(), timeout=args.interval)
             continue
         _attach_renderer(rt, args)
-        code = max(code, await _execute(rt, queued.id, args))
+        try:
+            code = max(code, await _execute(rt, queued.id, args, daemon_stop=None if once else stop))
+        except ConfigError as exc:  # e.g. another daemon picked the same task first
+            _err(f"Skipping {queued.id}: {exc}")
+    return code
 
 
 def cmd_queue(args: argparse.Namespace) -> int:
@@ -570,6 +591,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     sp = sub.add_parser("resume", help="resume an interrupted, blocked or planned task")
     sp.add_argument("task_id", nargs="?")
+    sp.add_argument("--answer", action="append", metavar="TEXT", help="answer to a question the task is blocked on (repeat, in order)")
     run_opts(sp)
     sp.set_defaults(func=cmd_resume)
 

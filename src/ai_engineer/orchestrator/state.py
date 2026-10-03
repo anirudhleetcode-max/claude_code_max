@@ -34,6 +34,9 @@ class PipelineState(BaseModel):
     understanding: dict[str, Any] | None = None
     understanding_source: str = ""
     clarifications: list[dict[str, str]] = Field(default_factory=list)
+    # blocking questions awaiting an answer (on_questions = "block"), and answers supplied on resume
+    pending_questions: list[str] = Field(default_factory=list)
+    supplied_answers: list[str] = Field(default_factory=list)
     plan: dict[str, Any] | None = None
     plan_source: str = ""
     order: list[str] = Field(default_factory=list)

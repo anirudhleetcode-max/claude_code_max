@@ -64,6 +64,14 @@ commands that were actually executed.
   run with your user's permissions and network access.
 - Static security rules and secret patterns are heuristics; they reduce, not
   eliminate, risk.
+- `web_fetch` checks the address before every request and every redirect. The DNS
+  lookup for that check and the connection itself are separate, so a DNS-rebinding
+  server can race them. Use `[web] allow_domains` or a network policy where that
+  matters.
+- In `developer` and `autonomous` mode, MEDIUM-risk commands run without approval.
+  These include unknown programs, project scripts and inline interpreter code (see
+  the table above). Against an untrusted repository or model, use the Docker
+  sandbox or `assisted` mode.
 - Prompt injection can still mislead the model into producing wrong code; the
   review and gates catch many such cases but not all. Review agent branches before
   merging.

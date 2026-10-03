@@ -134,16 +134,27 @@ class AgentLoop:
                 transcript=list(messages), final_text=kw.pop("final_text", last_text), **kw,
             )
 
+        budget = self.limits.context_budget_tokens
+        # Size of a fresh conversation (system + tools + task). A reset only helps once the conversation
+        # has grown well past it; otherwise an oversized task context would reset on every step.
+        fresh_tokens = request_tokens(self._request(messages))
+        oversize_warned = False
         while steps < self.limits.max_steps:
             self.ctx.cancel.raise_if_cancelled()
             if time.monotonic() - started > self.limits.max_seconds:
                 return result("timeout", error=f"time budget of {self.limits.max_seconds:.0f}s exhausted")
             req = self._request(messages)
-            if request_tokens(req) > self.limits.context_budget_tokens and len(messages) > 1:
+            tokens = request_tokens(req)
+            if tokens > budget and len(messages) > 1 and tokens - fresh_tokens > budget // 2:
                 messages = self._handoff(task_message)
                 resets += 1
                 self._emit(EventType.CONTEXT_COMPACTED, "context budget reached; continuing in a fresh conversation with a progress summary")
                 req = self._request(messages)
+                fresh_tokens = request_tokens(req)
+            if fresh_tokens > budget and not oversize_warned:
+                oversize_warned = True
+                self._emit(EventType.WARNING, f"the task context alone (~{fresh_tokens} tokens) exceeds the context budget ({budget}); "
+                           "continuing, but consider a model with a larger context window or a smaller max_output_tokens")
             try:
                 resp = await self.model.generate(req, cancel=self.ctx.cancel)
             except ContextLengthError as exc:
@@ -168,7 +179,9 @@ class AgentLoop:
             if resp.stop_reason == StopReason.REFUSAL:
                 return result("refused", error=resp.refusal_detail or "the model declined the request")
             calls = resp.tool_uses()
-            if not calls:
+            if calls:
+                nudges = 0  # the nudge limit counts consecutive text-only turns, not all of them
+            else:
                 if resp.stop_reason == StopReason.MAX_TOKENS:
                     messages.append(Message.user("Your reply was cut off by the output limit. Continue, working in smaller steps (smaller edits, fewer files per call)."))
                     continue

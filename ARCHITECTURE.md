@@ -278,8 +278,9 @@ TASK
  │    REVIEW     deterministic checks + independent reviewer model → FIX loop
  │    GATES      per-subtask verdict
  │    CHECKPOINT (post) [+ commit on agent branch when configured & safe]
- └─ FINAL QA     full validation, security scan of total diff, final review
- │               against original requirements, docs check, git-state check
+ └─ FINAL QA     docs update (when needed) first, then full validation + repair,
+ │               security scan of the total diff, final review against the original
+ │               requirements, commit of final-QA fixes (task branch only), git-state check
  └─ REPORT       engineering report (Markdown + JSON) in .agent/reports/
  └─ RETROSPECT   improvement suggestions (advisory only)
 ```
@@ -420,3 +421,9 @@ CI runs the test suite on Linux, macOS and Windows.
 - Web search needs a configured backend (SearXNG, Brave or Tavily).
 - The task budget, step budget and context management are heuristics tuned for
   typical repositories; very large changes should be split into several tasks.
+- Without git, checkpoints back up files the agent writes through its file tools.
+  Files changed by shell commands (formatters, code generators, `sed`) are not
+  backed up, so they are invisible to diffs and restores. Use git for full coverage.
+- Stopping cancels in-flight model requests and tool calls (child process trees are
+  killed). An external side effect that already happened, such as a request a tool
+  already sent, cannot be undone.

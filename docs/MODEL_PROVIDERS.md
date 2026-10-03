@@ -45,7 +45,10 @@ fast     = ["ollama:<model>"]
 
 For each request the router (`models/router.py`):
 1. skips models whose circuit breaker is open (after `failure_threshold` consecutive
-   failures, for `reset_after_s`; then a trial call is allowed);
+   failures, for `reset_after_s`; then a trial call is allowed). Only failures that
+   say the model is unhealthy count, such as exhausted retries, authentication or an
+   unreachable endpoint. Request-specific errors do not: context length, invalid
+   request, refusal and malformed output;
 2. retries transient errors (timeouts, connection errors, 5xx, 429 honouring
    `retry-after`) with exponential backoff and jitter, `max_attempts` times;
 3. moves to the next model on non-retryable errors (auth, invalid request, refusal,

@@ -194,16 +194,25 @@ async def test_interrupted_subtask_is_reverified_not_assumed(tmp_path: Path) -> 
         await rt.aclose()
     assert first.status == TaskStatus.INTERRUPTED
     assert first.state["subtasks"]["s1"]["status"] == "running"
-    # the edit happened on disk, but resuming must validate it rather than assume success
+    # the edit happened on disk, but resuming must neither assume success nor redo the work blindly:
+    # the implementer continues from the current state (told which files changed) and it is re-verified
     events = []
-    rt2 = open_runtime(repo, {"s": ScriptedProvider("s", by_role={"reviewer": [APPROVE]})})
+    seen: list[str] = []
+
+    def resumed_coder(req):
+        seen.append(req.messages[0].text())
+        return call("read_file", path="calc/__init__.py")
+
+    resumed_script = {"coder": [resumed_coder, call("submit_work", summary="add() already fixed; verified", files_changed=["calc/__init__.py"])], "reviewer": [APPROVE]}
+    rt2 = open_runtime(repo, {"s": ScriptedProvider("s", by_role=resumed_script)})
     rt2.bus.subscribe(events.append)
     try:
         resumed = await rt2.run_task(task.id)
     finally:
         await rt2.aclose()
     assert resumed.status == TaskStatus.COMPLETED, resumed.error
-    assert any("re-verifying" in e.message for e in events)
+    assert any("continuing from the current state" in e.message for e in events)
+    assert "Resuming an interrupted attempt" in seen[0] and "calc/__init__.py" in seen[0]
     assert any(e.type == EventType.TEST_PASSED for e in events)
 
 

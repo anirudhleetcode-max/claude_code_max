@@ -71,6 +71,7 @@ class Orchestrator:
         self._stop_watch: asyncio.Task[None] | None = None
         self._started = 0.0
         self._stop_after: str | None = None
+        self._lease_lost = False
 
     # ------------------------------------------------------------------ utilities
 
@@ -127,7 +128,13 @@ class Orchestrator:
     async def _watch_controls(self, task_id: str, token: CancellationToken, owner: str) -> None:
         while not token.cancelled:
             await asyncio.sleep(2.0)
-            self.store.heartbeat(task_id, owner)
+            if not self.store.heartbeat(task_id, owner):
+                # another process recovered the task (e.g. this one stalled past the lease TTL):
+                # stop at once and leave the task's state to the new owner
+                self._lease_lost = True
+                self._emit(EventType.WARNING, "lease lost: another process took over this task; stopping")
+                token.cancel("lease lost to another process")
+                return
             request = self.store.pop_control(task_id)
             if request in ("stop", "cancel"):
                 token.cancel(f"{request} requested")
@@ -139,12 +146,14 @@ class Orchestrator:
 
     async def run(self, task_id: str, stop_after: str | None = None) -> Task:
         self._stop_after = stop_after
+        self._lease_lost = False
         task = self.store.require_task(task_id)
         if task.status in (TaskStatus.COMPLETED, TaskStatus.COMPLETED_UNVERIFIED, TaskStatus.CANCELLED):
             raise ConfigError(f"task {task.id} is already {task.status}")
         owner = self.rt.lease_owner
         if not self.store.acquire_lease(task.id, owner):
             raise ConfigError(f"task {task.id} is being run by another process ({task.lease_owner})")
+        self.store.clear_control(task.id)  # a stop aimed at an earlier run must not stop this one
         state = PipelineState.model_validate(task.state) if task.state else PipelineState()
         resuming = bool(task.state)
         if resuming:
@@ -158,6 +167,7 @@ class Orchestrator:
         self._stop_watch = asyncio.create_task(self._watch_controls(task.id, token, owner))
         final_status = TaskStatus.FAILED
         error: str | None = None
+        cancelled: asyncio.CancelledError | None = None
         try:
             final_status = await self._pipeline(task, state)
         except _StopAfter:
@@ -168,6 +178,12 @@ class Orchestrator:
         except (BlockedError, AllModelsFailedError) as exc:
             final_status = TaskStatus.BLOCKED
             error = str(exc)
+        except asyncio.CancelledError as exc:
+            # the asyncio task itself was cancelled (e.g. a server shutting down): record the
+            # interruption and release the lease, then let the cancellation propagate
+            final_status = TaskStatus.INTERRUPTED
+            error = "interrupted: the run was cancelled"
+            cancelled = exc
         except Exception as exc:
             log.debug("pipeline crashed:\n%s", traceback.format_exc())
             final_status = TaskStatus.FAILED
@@ -178,6 +194,11 @@ class Orchestrator:
                 with contextlib.suppress(asyncio.CancelledError, Exception):
                     await self._stop_watch
             await self.rt.tool_ctx.processes.stop_all()
+        if self._lease_lost:
+            # the task now belongs to another process: do not overwrite its state or status
+            if cancelled is not None:
+                raise cancelled
+            return self.store.require_task(task.id)
         if final_status in (TaskStatus.BLOCKED, TaskStatus.INTERRUPTED, TaskStatus.CANCELLED, TaskStatus.FAILED) and state.stage not in ("report", "done", "understand"):
             with contextlib.suppress(Exception):
                 await self._write_report(task, state, final_status, error)
@@ -194,6 +215,8 @@ class Orchestrator:
         self._emit(event, f"Task {final_status}" + (f": {error}" if error else ""), status=str(final_status), report=state.report_path)
         self.store.save_metrics(task.id, self.rt.metrics.snapshot(task.id))
         self.rt.export_snapshots()
+        if cancelled is not None:
+            raise cancelled
         return task
 
     # ------------------------------------------------------------------ stages
@@ -230,10 +253,15 @@ class Orchestrator:
         if self.rt.profile is None:
             await self.rt.ensure_profile()
         brief = self.rt.context.project_brief(max_chars=3000)
-        model = self.rt.router.for_role("classifier")
-        u, source = await understand(model, task.description, brief, cancel=self.rt.tool_ctx.cancel)
+        if state.pending_questions and state.understanding:
+            # resuming a task that was blocked on questions: keep the triage, apply the answers
+            u, source = TaskUnderstanding.model_validate(state.understanding), state.understanding_source
+        else:
+            model = self.rt.router.for_role("classifier")
+            u, source = await understand(model, task.description, brief, cancel=self.rt.tool_ctx.cancel)
         if u.blocking_questions:
             u = await self._clarify(task, state, u)
+        state.pending_questions = []
         state.understanding = u.model_dump()
         state.understanding_source = source
         state.stage = "inspect"
@@ -250,15 +278,26 @@ class Orchestrator:
         policy = self.settings.agent.on_questions
         interactive = self.rt.interactive and self.settings.permissions.mode != Mode.AUTONOMOUS
         self._emit(EventType.QUESTION_ASKED, f"{len(u.blocking_questions)} blocking question(s)", questions=u.blocking_questions)
+        answers = [a for a in state.supplied_answers if a.strip()]
+        state.supplied_answers = []
+        if not answers and policy in ("ask", "block") and interactive:
+            answers = await self.rt.questions.ask(u.blocking_questions, context=u.summary) or []
+        if answers:
+            for q, a in zip(u.blocking_questions, answers, strict=False):
+                state.clarifications.append({"question": q, "answer": a})
+            extra = [f"Clarified: {c['question']} → {c['answer']}" for c in state.clarifications]
+            return u.model_copy(update={"blocking_questions": [], "requirements": [*u.requirements, *extra]})
         if policy == "block":
-            raise BlockedError("clarification required: " + " | ".join(u.blocking_questions))
-        if policy == "ask" and interactive:
-            answers = await self.rt.questions.ask(u.blocking_questions, context=u.summary)
-            if answers:
-                for q, a in zip(u.blocking_questions, answers, strict=False):
-                    state.clarifications.append({"question": q, "answer": a})
-                extra = [f"Clarified: {c['question']} → {c['answer']}" for c in state.clarifications]
-                return u.model_copy(update={"blocking_questions": [], "requirements": [*u.requirements, *extra]})
+            # keep the triage and the questions so that a resume with answers continues from here
+            state.understanding = u.model_dump()
+            state.understanding_source = state.understanding_source or "model"
+            state.pending_questions = list(u.blocking_questions)
+            self._save(task, state)
+            numbered = " | ".join(f"{i}. {q}" for i, q in enumerate(u.blocking_questions, 1))
+            raise BlockedError(
+                f"clarification required: {numbered} — answer with `aie resume {task.id} --answer \"...\"` "
+                "(once per question, in order) or resume interactively"
+            )
         assumed = [f"Unanswered question (proceeding with the most reasonable interpretation): {q}" for q in u.blocking_questions]
         return u.model_copy(update={"blocking_questions": [], "assumptions": [*u.assumptions, *assumed]})
 
@@ -275,6 +314,8 @@ class Orchestrator:
             from ..tester.models import CheckKind
 
             kinds = [CheckKind.TEST, CheckKind.LINT, CheckKind.TYPECHECK]
+            if self.settings.validation.dependency_audit and self.rt.validation.command_for(CheckKind.AUDIT) is not None:
+                kinds.append(CheckKind.AUDIT)  # so advisories that pre-date the change are not blamed on it
             for kind, result in zip(kinds, await self._run_checks_parallel(task, None, kinds, baseline=True), strict=True):
                 state.baseline[str(kind)] = result.model_dump(mode="json")
         state.stage = "plan" if u.task_type == "change" else "answer"
@@ -330,7 +371,6 @@ class Orchestrator:
             for decision_text in plan.decisions[:10]:
                 with contextlib.suppress(Exception):
                     self.rt.memory.record_decision(decision_text[:120], decision_text, "recorded during planning", task_id=task.id)
-        await self._prepare_git(task, state)
         state.stage = "execute"
         self._save(task, state)
         self._emit(EventType.PLAN_CREATED, f"Plan with {len(ordered)} subtask(s) ({source})", subtasks=[{"id": s.id, "title": s.title} for s in ordered], approach=plan.approach)
@@ -361,10 +401,28 @@ class Orchestrator:
             state.start_checkpoint = cp.id
             self.store.update_task(task.id, checkpoint_id=cp.id)
 
+    async def _check_task_branch(self, state: PipelineState) -> bool:
+        """Auto-commit only on the task's own branch; anything else switches auto-commit off."""
+        if not state.auto_commit or self.rt.git is None:
+            return state.auto_commit
+        current = await self.rt.git.current_branch()
+        if state.branch and current != state.branch:
+            state.auto_commit = False
+            note = f"auto-commit disabled: expected branch {state.branch} but {current or 'a detached HEAD'} is checked out; changes are left uncommitted"
+            state.notes.append(note)
+            self._emit(EventType.WARNING, note)
+        return state.auto_commit
+
     # ------------------------------------------------------------------ execution
 
     async def _stage_execute(self, task: Task, state: PipelineState, u: TaskUnderstanding) -> None:
         self._emit(EventType.STAGE_STARTED, "Executing the plan", stage="execute")
+        if state.start_checkpoint is None:
+            # branch setup happens here, not while planning: `aie plan` must not switch branches
+            await self._prepare_git(task, state)
+            self._save(task, state)
+        elif state.auto_commit:
+            await self._check_task_branch(state)
         plan = Plan.model_validate(state.plan)
         by_id = {s.id: s for s in plan.subtasks}
         for sid in state.order:
@@ -425,30 +483,37 @@ class Orchestrator:
         self._emit(EventType.SUBTASK_STARTED, f"Subtask {sub.id}: {sub.title}", subtask=sub.id)
         child_id = f"{task.id}:{sub.id}"
         with contextlib.suppress(Exception):
-            self.store.update_task(child_id, status=TaskStatus.RUNNING)
-        resumed_with_changes = False
+            self.store.update_task(child_id, status=TaskStatus.RUNNING, error=None)
+        resumed_changes: list[str] = []
         if st.checkpoint_before is None:
             cp = await self.rt.checkpoints.create(f"before {sub.id}: {sub.title}", task_id=task.id, subtask_id=sub.id)
             st.checkpoint_before = cp.id
         elif st.status == "running":
-            changed = await self.rt.checkpoints.changed_files_since(st.checkpoint_before)
-            resumed_with_changes = bool(changed)
-            if resumed_with_changes:
-                self._emit(EventType.INFO, f"Resumed subtask {sub.id}: {len(changed)} changed file(s) found on disk — re-verifying instead of assuming completion")
+            resumed_changes = await self.rt.checkpoints.changed_files_since(st.checkpoint_before)
+            if resumed_changes:
+                self._emit(EventType.INFO, f"Resumed subtask {sub.id}: {len(resumed_changes)} changed file(s) found on disk — continuing from the current state and re-verifying")
         st.status = "running"
         st.attempts += 1
         self._save(task, state)
 
-        if not resumed_with_changes:
-            self._emit(EventType.STAGE_STARTED, f"Implementing {sub.id}", stage="implement")
-            tools = self._tools(READ_TOOLS, WRITE_TOOLS, NETWORK_TOOLS)
-            result = await self._run_loop(role="coder", stage="implement", prompt="implementer", message=self._subtask_message(task, state, u, plan, sub), finish="submit_work", tools=tools)
-            st.submission = result.submission
-            st.loop_status = result.status
-            if result.status not in ("finished", "finished_no_submit"):
-                st.notes.append(f"implementation loop ended with {result.status}: {result.error}")
-            self._emit(EventType.STAGE_COMPLETED, f"Implementation loop: {result.status} ({result.steps} steps, {result.tool_calls} tool calls)", stage="implement")
-            self._save(task, state)
+        # An interrupted subtask is never assumed finished: the implementer continues from what is on disk.
+        message = self._subtask_message(task, state, u, plan, sub)
+        if resumed_changes:
+            message += (
+                "\n\n# Resuming an interrupted attempt\nThis subtask was interrupted after these files were changed: "
+                + ", ".join(resumed_changes[:30])
+                + ". Inspect their current content, complete whatever is still missing, and call submit_work."
+            )
+        self._emit(EventType.STAGE_STARTED, f"Implementing {sub.id}", stage="implement")
+        tools = self._tools(READ_TOOLS, WRITE_TOOLS, NETWORK_TOOLS)
+        st.loop_status = None
+        result = await self._run_loop(role="coder", stage="implement", prompt="implementer", message=message, finish="submit_work", tools=tools)
+        st.submission = result.submission
+        st.loop_status = result.status
+        if result.status not in ("finished", "finished_no_submit"):
+            st.notes.append(f"implementation loop ended with {result.status}: {result.error}")
+        self._emit(EventType.STAGE_COMPLETED, f"Implementation loop: {result.status} ({result.steps} steps, {result.tool_calls} tool calls)", stage="implement")
+        self._save(task, state)
 
         results = await self._validate_and_repair(task, state, sub, st, scope="subtask")
         review: ReviewResult | None = None
@@ -462,7 +527,7 @@ class Orchestrator:
         st.status = {"COMPLETED": "completed", "COMPLETED_UNVERIFIED": "completed_unverified"}.get(verdict, "failed")
         cp = await self.rt.checkpoints.create(f"after {sub.id} ({verdict})", task_id=task.id, subtask_id=sub.id, verified=verdict == "COMPLETED")
         st.checkpoint_after = cp.id
-        if state.auto_commit and st.files_changed and verdict != "FAILED":
+        if state.auto_commit and st.files_changed and verdict != "FAILED" and await self._check_task_branch(state):
             st.commit = await self._commit(task, sub, st, verdict)
         self._save(task, state)
         child_status = {"completed": TaskStatus.COMPLETED, "completed_unverified": TaskStatus.COMPLETED_UNVERIFIED}.get(st.status, TaskStatus.FAILED)
@@ -553,6 +618,8 @@ class Orchestrator:
         if is_test:
             self._emit(EventType.TEST_STARTED, f"Running {label}{'targeted ' if targeted else ''}tests", kind=str(kind), targeted=targeted[:20] if targeted else None)
         result = await engine.run_check(kind, targeted_files=targeted, cancel=self.rt.tool_ctx.cancel)
+        if result.status == "cancelled":
+            self.rt.tool_ctx.cancel.raise_if_cancelled()  # interrupted, not failed
         result.output_tail = self.rt.redactor.redact_text(result.output_tail or "")
         if result.status != "unavailable":
             self.store.add_test_run(task.id, sub_id, result)
@@ -656,7 +723,8 @@ class Orchestrator:
             self._emit(EventType.REVIEW_STARTED, f"Independent review of {sub.id} (round {iteration + 1})", stage="review")
             self.bus.context["stage"] = "review"
             criteria = sub.acceptance_criteria or u.acceptance_criteria
-            deleted = [f for f in st.files_changed if not (self.rt.workspace / f).exists()]
+            changed = await self.rt.checkpoints.changed_files_since(st.checkpoint_before)
+            deleted = [f for f in changed if not (self.rt.workspace / f).exists()]
             review, findings = await review_change(
                 self.rt.router.for_role("reviewer"), task=f"{task.description}\n\nSubtask {sub.id}: {sub.title}\n{sub.description}",
                 criteria=criteria, diff=diff, validation_summary=self._validation_summary(results), deleted_files=deleted,
@@ -669,10 +737,13 @@ class Orchestrator:
             blocking = review.blocking()
             unmet = [c for c in review.requirements if c.status == "unmet"]
             self._emit(EventType.REVIEW_COMPLETED, f"Review: {review.verdict} ({len(blocking)} blocking, {len(review.issues)} total)", verdict=review.verdict, blocking=len(blocking), source=review.source)
-            if (not blocking and not unmet) or iteration >= self.settings.agent.max_review_iterations:
+            if review.verdict == "approve" or iteration >= self.settings.agent.max_review_iterations:
                 break
-            issues = "\n".join(f"- [{i.severity}/{i.category}] {i.file or ''}{':' + str(i.line) if i.line else ''} {i.description}" + (f" (suggestion: {i.suggestion})" if i.suggestion else "") for i in blocking)
+            to_fix = blocking or review.issues
+            issues = "\n".join(f"- [{i.severity}/{i.category}] {i.file or ''}{':' + str(i.line) if i.line else ''} {i.description}" + (f" (suggestion: {i.suggestion})" if i.suggestion else "") for i in to_fix)
             issues += "".join(f"\n- [unmet criterion] {c.criterion}: {c.evidence}" for c in unmet)
+            if not to_fix and not unmet:
+                issues = f"- the reviewer requested changes: {review.summary}"
             message = f"# Task\n{task.description}\n\n# Subtask {sub.id}: {sub.title}\n{sub.description}\n\n# Review findings to address\n{issues}"
             tools = self._tools(READ_TOOLS, WRITE_TOOLS)
             await self._run_loop(role="coder", stage="review_fix", prompt="fixer", message=message, finish="submit_work", tools=tools)
@@ -694,14 +765,14 @@ class Orchestrator:
         submission = st.submission or {}
         blocked = bool(submission.get("blocked"))
         needs_changes = sub.kind not in ("research", "investigate")
-        done = (st.loop_status in ("finished", "finished_no_submit", None)) and not blocked and (bool(st.files_changed) or not needs_changes)
+        done = st.loop_status in ("finished", "finished_no_submit") and not blocked and (bool(st.files_changed) or not needs_changes)
         detail = "changes made: " + (", ".join(st.files_changed[:10]) or "none")
         if blocked:
             detail = f"agent reported it was blocked: {submission.get('unresolved', '')[:300]}"
         elif not st.files_changed and needs_changes:
             detail = "no files were changed"
-        elif st.loop_status not in ("finished", "finished_no_submit", None):
-            detail += f" (loop ended: {st.loop_status})"
+        elif st.loop_status not in ("finished", "finished_no_submit"):
+            detail += f" (implementation did not finish: {st.loop_status or 'interrupted'})"
         by_kind = {str(r.kind): r for r in results}
         return evaluate_gates(gates, GateInputs(
             in_scope_tests=set(self._related_tests(st.files_changed)),
@@ -747,6 +818,10 @@ class Orchestrator:
         self._emit(EventType.STAGE_STARTED, "Final QA: full validation, security scan, final review", stage="final_qa")
         self.bus.context.update({"stage": "final_qa", "subtask_id": ""})
         assert state.start_checkpoint is not None
+        # Documentation updates run first so that whatever the docs stage changes is validated,
+        # reviewed and scanned like every other change.
+        docs = await self._docs_gate(task, state, u, await self.rt.checkpoints.changed_files_since(state.start_checkpoint))
+        state.docs = {"status": docs[0], "detail": docs[1]} if docs else None
         results = await self._validate_and_repair(task, state, None, None, scope="final")
         diff = await self.rt.checkpoints.diff_since(state.start_checkpoint)
         changed = await self.rt.checkpoints.changed_files_since(state.start_checkpoint)
@@ -778,9 +853,8 @@ class Orchestrator:
             from ..tester.models import CheckKind
 
             audit = await self._run_check(task, None, CheckKind.AUDIT, None)
-        docs = await self._docs_gate(task, state, u, changed)
-        state.docs = {"status": docs[0], "detail": docs[1]} if docs else None
-        git_state = await self._git_state(state, diff)
+        await self._commit_final_fixes(task, state, results, changed)
+        git_state = await self._git_state(state, diff, changed)
         state.git_state = {"ok": git_state[0], "detail": git_state[1]} if git_state else None
         by_kind = {str(r.kind): r for r in results}
         any_failed = any(s.status in ("failed", "skipped", "blocked") for s in state.subtasks.values())
@@ -795,6 +869,7 @@ class Orchestrator:
             security_findings=findings,
             security_ran=True,
             audit=audit,
+            audit_baseline=_restore_check(state.baseline.get("audit")),
             review=review,
             docs=docs,
             git_state=git_state,
@@ -825,7 +900,27 @@ class Orchestrator:
             return "passed", "documentation updated by the docs stage"
         return "failed", "the change affects documented behaviour but no documentation was updated"
 
-    async def _git_state(self, state: PipelineState, diff: str) -> tuple[bool, str] | None:
+    async def _commit_final_fixes(self, task: Task, state: PipelineState, results: list[Any], changed: list[str]) -> None:
+        """Commit what final QA (repairs, documentation) changed, when its validation is clean."""
+        git = self.rt.git
+        if git is None or not state.auto_commit or not changed:
+            return
+        in_scope = set(self._related_tests(changed))
+        if self._needs_repair(results, state, in_scope) or not await self._check_task_branch(state):
+            return
+        uncommitted = {e.path for e in (await git.status()).entries}
+        paths = [p for p in changed if p in uncommitted]
+        if not paths:
+            return
+        try:
+            if await stage_for_commit(git, self.rt.tool_ctx.guard, paths):
+                sha = await git.commit(f"{self.settings.git.commit_prefix}final QA fixes\n\nTask: {task.id}\n", only=paths)
+                self._emit(EventType.COMMIT_CREATED, f"Committed final QA changes as {sha[:10]}", sha=sha)
+        except Exception as exc:  # reported by the git_state gate as uncommitted paths
+            state.notes.append(f"final QA changes not committed: {exc}")
+            self._emit(EventType.WARNING, f"Final QA changes not committed: {exc}")
+
+    async def _git_state(self, state: PipelineState, diff: str, changed: list[str] | None = None) -> tuple[bool, str] | None:
         git = self.rt.git
         if git is None:
             return None
@@ -839,7 +934,14 @@ class Orchestrator:
         markers = [p for p, lines in added.items() if any(t.startswith(("<<<<<<< ", ">>>>>>> ")) for _, t in lines)]
         if markers:
             problems.append(f"conflict markers in {', '.join(markers[:5])}")
-        secrets = scan_text("\n".join(t for lines in added.values() for _, t in lines))
+        text = "\n".join(t for lines in added.values() for _, t in lines)
+        # diffs hide secret-file values, so scan the changed secret files themselves
+        guard = self.rt.tool_ctx.guard
+        for rel in changed or []:
+            path = self.rt.workspace / rel
+            if guard.is_secret_file(rel) and path.is_file() and path.stat().st_size < 1_000_000:
+                text += "\n" + path.read_text(encoding="utf-8", errors="replace")
+        secrets = scan_text(text)
         if secrets:
             problems.append(f"possible secrets in the change ({', '.join(sorted({s.kind for s in secrets}))})")
         big = [p for p in added if (self.rt.workspace / p).exists() and (self.rt.workspace / p).stat().st_size > 5_000_000]
