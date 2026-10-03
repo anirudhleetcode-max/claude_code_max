@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from typing import Any
 
 from pydantic import Field
 
@@ -68,7 +69,7 @@ class SearchTextTool(Tool):
         return ToolResult(content="\n".join(lines), data={"matches": len(matches)})
 
 
-def _index(ctx: ToolContext):  # type: ignore[no-untyped-def]
+def _index(ctx: ToolContext) -> Any:
     if ctx.repo_index is None:
         raise ToolError("the repository index is not available")
     return ctx.repo_index

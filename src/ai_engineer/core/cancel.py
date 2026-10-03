@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable
-from typing import TypeVar
+from typing import Any, TypeVar
 
 from .errors import CancelledByUser
 
@@ -79,7 +79,8 @@ async def run_cancellable(coro_factory: Callable[[], Awaitable[T]], token: Cance
     task: asyncio.Future[T] = asyncio.ensure_future(coro_factory())
     waiter = asyncio.ensure_future(token.wait())
     try:
-        done, _ = await asyncio.wait({task, waiter}, return_when=asyncio.FIRST_COMPLETED)
+        pending: set[asyncio.Future[Any]] = {task, waiter}
+        done, _ = await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)
         if task in done:
             return task.result()
         task.cancel()

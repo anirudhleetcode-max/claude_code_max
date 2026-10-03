@@ -243,6 +243,11 @@ class ValidationSettings(_Section):
     typecheck_command: str | None = None
     build_command: str | None = None
     test_timeout_s: float = 1200.0
+    # Run the checks once before any change so pre-existing failures are not
+    # attributed to (or hidden by) the agent.
+    baseline: bool = True
+    # After targeted tests pass, also run the full suite at the end of each subtask.
+    full_suite_per_subtask: bool = True
     run_full_suite_at_end: bool = True
     dependency_audit: bool = True
 

@@ -33,6 +33,9 @@ NON_INTERACTIVE_ENV = {
     "GIT_PAGER": "cat",
     "PAGER": "cat",
     "PYTHONUNBUFFERED": "1",
+    # Bytecode written by one run can be reused after a same-second, same-size edit
+    # (pyc staleness is checked by mtime seconds + size), so agent-run commands never write it.
+    "PYTHONDONTWRITEBYTECODE": "1",
     "NO_COLOR": "1",
     "FORCE_COLOR": "0",
     "TERM": "dumb",

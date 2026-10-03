@@ -126,7 +126,7 @@ def from_openai_response(data: dict[str, Any], model: str) -> ModelResponse:
 
 
 class OpenAIProvider(HttpProviderMixin, ModelProvider):
-    type = "openai"
+    provider_type = "openai"
 
     def __init__(self, name: str, config: ProviderConfig) -> None:
         super().__init__(name, config)

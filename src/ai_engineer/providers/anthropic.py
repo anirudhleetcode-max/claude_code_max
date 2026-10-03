@@ -58,7 +58,7 @@ def _import_sdk() -> Any:
 
 
 class AnthropicProvider(ModelProvider):
-    type = "anthropic"
+    provider_type = "anthropic"
 
     def __init__(self, name: str, config: ProviderConfig, http_client: Any = None) -> None:
         super().__init__(name, config)

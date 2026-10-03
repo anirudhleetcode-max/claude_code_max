@@ -163,3 +163,25 @@ def test_scan_diff_flags_hardcoded_secret() -> None:
     findings = scan_diff(diff)
     assert any(f.rule == "hardcoded-secret" for f in findings)
     assert all(FAKE_GH not in f.snippet for f in findings)
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ('DB_PASSWORD = "hunter2-Xq9!zL7w"', True),
+        ("DB_PASSWORD=S3cr3t-pass99", True),
+        ("api_key = 'AbC123xyz987QWE'", True),
+        ("SECRET_KEY=django-insecure-8a7sd6f87asd6f", True),
+        # code, not credentials
+        ("token: CancellationToken", False),
+        ("tokens = program_tokens(command)", False),
+        ("tokens = tokens[1:]", False),
+        ('MAX_TOKENS = "max_tokens"', False),
+        ("tokenize = 'unicode61'", False),
+        ('"api_key_env": "OPENAI_COMPATIBLE_API_KEY"', False),
+        ("password = getpass()", False),
+        ("input_tokens=resp.usage.input_tokens", False),
+    ],
+)
+def test_credential_assignment_separates_literals_from_code(text: str, expected: bool) -> None:
+    assert bool(scan_text(text)) is expected

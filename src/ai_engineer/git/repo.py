@@ -282,7 +282,9 @@ class GitRepo:
             if not real_index.is_absolute():
                 real_index = self.root / real_index
             if real_index.is_file():
-                shutil.copyfile(real_index, index)
+                # copy2 preserves the index mtime, which git's "racily clean" check relies on:
+                # with a fresh mtime, a same-size edit made in the same second would look unchanged.
+                shutil.copy2(real_index, index)
             else:
                 head = await self.head()
                 if head:

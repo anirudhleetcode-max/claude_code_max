@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 
 class AIEngineerError(Exception):
     """Base class for all errors raised by AI Engineer."""
@@ -49,7 +51,7 @@ class RetryableProviderError(ProviderError):
 
 
 class RateLimitError(RetryableProviderError):
-    def __init__(self, message: str, *, retry_after: float | None = None, **kw):  # type: ignore[no-untyped-def]
+    def __init__(self, message: str, *, retry_after: float | None = None, **kw: Any) -> None:
         super().__init__(message, **kw)
         self.retry_after = retry_after
 
@@ -91,7 +93,7 @@ class AllModelsFailedError(ProviderError):
 
     fallback = False
 
-    def __init__(self, message: str, *, attempts: list[str] | None = None, **kw):  # type: ignore[no-untyped-def]
+    def __init__(self, message: str, *, attempts: list[str] | None = None, **kw: Any) -> None:
         super().__init__(message, **kw)
         self.attempts = attempts or []
 

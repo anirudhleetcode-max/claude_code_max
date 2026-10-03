@@ -68,7 +68,7 @@ def from_ollama_response(data: dict[str, Any], model: str) -> ModelResponse:
 
 
 class OllamaProvider(HttpProviderMixin, ModelProvider):
-    type = "ollama"
+    provider_type = "ollama"
 
     def __init__(self, name: str, config: ProviderConfig) -> None:
         super().__init__(name, config)

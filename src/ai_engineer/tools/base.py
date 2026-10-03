@@ -120,18 +120,18 @@ class Tool(ABC):
     def spec(self) -> ToolSpec:
         return ToolSpec(name=self.name, description=self.description.strip(), input_schema=_clean_schema(self.Input.model_json_schema()))
 
-    def summarize(self, args: ToolInput) -> str:
+    def summarize(self, args: Any) -> str:
         fields = ", ".join(f"{k}={v!r}" for k, v in args.model_dump(exclude_defaults=True).items())
         return f"{self.name}({fields[:200]})"
 
-    def assess(self, args: ToolInput, ctx: ToolContext) -> ActionAssessment:
+    def assess(self, args: Any, ctx: ToolContext) -> ActionAssessment:
         return ActionAssessment(
             level=self.level,
             summary=self.summarize(args),
             read_only=self.side_effect in (SideEffect.NONE, SideEffect.READ),
         )
 
-    def effective_timeout(self, args: ToolInput, ctx: ToolContext) -> float:
+    def effective_timeout(self, args: Any, ctx: ToolContext) -> float:
         return self.timeout_s
 
     @property

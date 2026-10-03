@@ -221,8 +221,8 @@ class WebSearchTool(Tool):
             return ToolResult(content="no results")
         retrieved = utcnow_iso()
         lines = [f"Search results for {args.query!r} (retrieved {retrieved}):"]
-        for i, r in enumerate(results, 1):
-            lines.append(f"{i}. {r['title']}\n   {r['url']}\n   {r['snippet'][:300]}")
+        for i, item in enumerate(results, 1):
+            lines.append(f"{i}. {item['title']}\n   {item['url']}\n   {item['snippet'][:300]}")
         return ToolResult(content="\n".join(lines), data={"results": results})
 
 

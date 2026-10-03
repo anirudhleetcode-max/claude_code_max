@@ -59,7 +59,7 @@ def response_from_dict(data: dict[str, Any], model: str = "scripted") -> ModelRe
 
 
 class ScriptedProvider(ModelProvider):
-    type = "scripted"
+    provider_type = "scripted"
 
     def __init__(
         self,

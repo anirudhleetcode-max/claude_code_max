@@ -93,7 +93,7 @@ class ModelProvider(ABC):
     and token estimation when the provider does not report usage.
     """
 
-    type: str = "base"
+    provider_type: str = "base"
 
     def __init__(self, name: str, config: ProviderConfig) -> None:
         self.name = name

@@ -23,6 +23,7 @@ class _Pattern:
     regex: re.Pattern[str]
     group: int = 0  # which group holds the secret value (0 = whole match)
     check_entropy: bool = False
+    assignment: bool = False  # generic key=value rule: apply code-vs-literal heuristics
 
 
 _PATTERNS: tuple[_Pattern, ...] = (
@@ -49,12 +50,13 @@ _PATTERNS: tuple[_Pattern, ...] = (
             r"""(?ix)
             \b[A-Z0-9_.\-]*(?:password|passwd|pwd|secret|token|api[_\-]?key|access[_\-]?key|
             private[_\-]?key|client[_\-]?secret|auth[_\-]?key|credentials?)[A-Z0-9_.\-]*
-            ["']?\s*[:=]\s*["']?
-            ([^\s"'`,;#}{)(<>]{8,})
+            ["']?\s*[:=]\s*
+            (["'`]?)([^\s"'`,;#}{)(<>\[]{8,})
             """
         ),
-        group=1,
+        group=2,
         check_entropy=True,
+        assignment=True,
     ),
 )
 
@@ -85,12 +87,38 @@ def shannon_entropy(value: str) -> float:
     return -sum((c / n) * math.log2(c / n) for c in counts.values())
 
 
+def _char_classes(value: str) -> int:
+    return sum(
+        bool(re.search(p, value)) for p in (r"[a-z]", r"[A-Z]", r"[0-9]", r"[^A-Za-z0-9_]")
+    )
+
+
 def _looks_secret(value: str) -> bool:
     if _PLACEHOLDER.match(value):
         return False
     if value.isdigit() or len(set(value)) < 5:
         return False
     return shannon_entropy(value) >= 3.0
+
+
+_CODE_LIKE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)*$")
+
+
+def _assignment_value_is_secret(match: re.Match[str], text: str) -> bool:
+    """Distinguish credential literals from code such as ``token: CancellationToken`` or ``tokens = f(x)``."""
+    quote, value = match.group(1), match.group(2)
+    if not _looks_secret(value):
+        return False
+    if quote:
+        # a quoted literal: require some randomness (several character classes, not an identifier/constant name)
+        identifier_name = bool(_CODE_LIKE.match(value)) and not re.search(r"[0-9]", value)
+        return len(value) >= 10 and _char_classes(value) >= 2 and not identifier_name
+    following = text[match.end(2) : match.end(2) + 1]
+    if following in ("(", "["):
+        return False  # a call or subscript expression
+    if _CODE_LIKE.match(value):
+        return False  # an identifier or attribute access
+    return bool(re.search(r"[0-9]", value)) or bool(re.search(r"[^A-Za-z0-9_.]", value))
 
 
 @dataclass(frozen=True)
@@ -121,7 +149,10 @@ def scan_text(text: str, max_findings: int = 100) -> list[SecretFinding]:
             if any(s <= start < e for s, e in covered):
                 continue
             value = match.group(pattern.group)
-            if pattern.check_entropy and not _looks_secret(value):
+            if pattern.assignment:
+                if not _assignment_value_is_secret(match, text):
+                    continue
+            elif pattern.check_entropy and not _looks_secret(value):
                 continue
             covered.append((start, end))
             line = text.count("\n", 0, start) + 1

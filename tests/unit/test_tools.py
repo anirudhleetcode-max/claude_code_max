@@ -270,6 +270,7 @@ def test_child_env_strips_secrets() -> None:
     s.terminal.env_allow = ["KEEP_TOKEN"]
     assert build_env(s.terminal, base={"KEEP_TOKEN": "t"})["KEEP_TOKEN"] == "t"
     assert env["GIT_TERMINAL_PROMPT"] == "0" and env["CI"] == "true"
+    assert env["PYTHONDONTWRITEBYTECODE"] == "1"  # stale-bytecode regression guard
 
 
 async def test_background_process_lifecycle(tmp_path: Path) -> None:
@@ -385,3 +386,30 @@ async def test_queue_broker_resolution_and_timeout() -> None:
     quick = QueueBroker(timeout_s=0.05)
     decision = await quick.request(ApprovalRequest(tool="t", summary="s2", reason="r"))
     assert not decision.approved and decision.by == "timeout"
+
+
+async def test_snapshot_detects_same_size_edit_in_same_second(git_repo: Path) -> None:
+    """Regression: git's stat cache must not hide a same-size edit made in the same second.
+
+    mtimes are pinned so the race is reproduced deterministically: the file and the index
+    share one timestamp (as when an edit lands in the same second as the last index write).
+    """
+    import os
+    import time
+
+    from tests.conftest import git
+
+    repo = GitRepo(git_repo)
+    target = git_repo / "m.py"
+    target.write_text("x = a - b\n")
+    stamp = time.time() - 30
+    os.utime(target, (stamp, stamp))
+    git(git_repo, "add", "m.py")
+    git(git_repo, "commit", "-q", "-m", "m")
+    index = git_repo / ".git" / "index"
+    os.utime(index, (stamp, stamp))
+    _, tree = await repo.snapshot("c1", "before")
+    target.write_text("x = a * b\n")  # same size
+    os.utime(target, (stamp, stamp))  # and indistinguishable mtime
+    os.utime(index, (stamp, stamp))
+    assert await repo.changed_files_since(tree) == ["m.py"]

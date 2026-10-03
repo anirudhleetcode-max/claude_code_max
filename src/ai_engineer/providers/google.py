@@ -17,7 +17,7 @@ _REFUSAL_REASONS = {"SAFETY", "RECITATION", "PROHIBITED_CONTENT", "BLOCKLIST", "
 
 
 class GoogleProvider(HttpProviderMixin, ModelProvider):
-    type = "google"
+    provider_type = "google"
 
     def __init__(self, name: str, config: ProviderConfig) -> None:
         super().__init__(name, config)
@@ -41,9 +41,9 @@ class GoogleProvider(HttpProviderMixin, ModelProvider):
         # this preserves thought signatures exactly.
         for block in msg.content:
             if isinstance(block, OpaqueBlock) and block.provider == self.name and block.model == model:
-                parts = block.payload.get("gemini_parts")
-                if isinstance(parts, list) and parts:
-                    return parts
+                raw = block.payload.get("gemini_parts")
+                if isinstance(raw, list) and raw:
+                    return raw
         parts: list[dict[str, Any]] = []
         for block in msg.content:
             if isinstance(block, TextBlock) and block.text:

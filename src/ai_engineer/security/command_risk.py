@@ -580,16 +580,15 @@ def _classify_segment(tokens: list[str], segment: str, ctx: _Context, a: Command
     if _classify_package_manager(prog, args, a):
         return
     if prog in SHELLS:
-        inner = None
+        nested: str | None = None
         for flag in ("-c", "/c", "-command", "-Command", "/C", "-lc", "-ic"):
             if flag in args:
-                idx = args.index(flag)
-                inner = " ".join(args[idx + 1 :])
+                nested = " ".join(args[args.index(flag) + 1 :])
                 break
-        if inner and depth < 4:
-            sub = classify_command(inner, ctx.workspace, windows=ctx.windows, _depth=depth + 1)
-            a.merge(sub)
-            a.bump(Risk.MEDIUM if sub.risk < Risk.MEDIUM else sub.risk, "runs a nested shell command")
+        if nested and depth < 4:
+            nested_assessment = classify_command(nested, ctx.workspace, windows=ctx.windows, _depth=depth + 1)
+            a.merge(nested_assessment)
+            a.bump(max(Risk.MEDIUM, nested_assessment.risk), "runs a nested shell command")
         elif args:
             a.bump(Risk.MEDIUM, f"runs shell script {args[0]}")
         else:
@@ -639,11 +638,11 @@ def _classify_segment(tokens: list[str], segment: str, ctx: _Context, a: Command
             a.bump(Risk.HIGH, "find -delete removes files")
         elif any(x in ("-exec", "-execdir", "-ok", "-okdir") for x in args):
             idx = next(i for i, x in enumerate(args) if x in ("-exec", "-execdir", "-ok", "-okdir"))
-            inner = [x for x in args[idx + 1 :] if x not in ("{}", ";", "+", "\\;")]
-            sub = CommandAssessment(command=" ".join(inner), workspace=ctx.workspace)
-            if inner:
-                _classify_segment(inner, " ".join(inner), ctx, sub, depth + 1)
-            a.merge(sub)
+            exec_tokens = [x for x in args[idx + 1 :] if x not in ("{}", ";", "+", "\\;")]
+            exec_assessment = CommandAssessment(command=" ".join(exec_tokens), workspace=ctx.workspace)
+            if exec_tokens:
+                _classify_segment(exec_tokens, " ".join(exec_tokens), ctx, exec_assessment, depth + 1)
+            a.merge(exec_assessment)
             a.bump(Risk.MEDIUM, "find -exec runs a command per file")
         return
     if prog in ("awk", "gawk") and re.search(r"system\s*\(|\|\s*\"", segment):
