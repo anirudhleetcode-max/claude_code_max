@@ -29,13 +29,23 @@ escalation (`sudo`, `su`, `doas`, `runas`) is HIGH risk and requires approval.
 | LOW (read-only) | `ls`, `cat`, `git status`, `rg` | allowed in every mode, including `safe` |
 | LOW (executes code) | `pytest`, `npm test`, `cargo build`, `ruff check` | allowed from `developer` level |
 | MEDIUM | package installs, migrations, unknown programs, writes into the workspace, `python script.py` | allowed in `developer`/`autonomous`; asks in `assisted` |
-| HIGH | `rm -r`, `git reset --hard`, `git push`, `curl … \| sh`, system package managers, destructive SQL, cloud/cluster changes, credential tools | approval required |
+| HIGH | `rm -r`, `git reset --hard`, `git push` (any force form), `git rebase`, branch/tag/stash deletion, discarding work (`git checkout .`, `git restore --worktree`, `git clean -f`), `curl … \| sh`, system package managers, destructive SQL (`DROP`, `TRUNCATE`, unbounded `DELETE`, `dropdb`, `FLUSHALL`), cloud/cluster changes, credential tools, deleting or overwriting `.env`/key/credential files, service, user, firewall, disk and power management | approval required |
 | CRITICAL | `rm -rf /` or `~`, `mkfs`, `dd of=/dev/…`, fork bombs, `kill -9 -1`, recursive permission changes on system directories | never allowed |
 
 Compound commands (`&&`, `;`, `|`), command substitution (`$(…)`, backticks),
-wrappers (`sudo`, `env`, `timeout`, `xargs`, `sh -c`), redirections and Windows
-syntax are analysed; the highest risk of any part wins; anything unparseable is
-treated as at least MEDIUM. The classifier is a policy aid, **not a sandbox**: for
+subshells and groups (`( … )`, `{ …; }`), wrappers (`sudo`, `env`, `timeout`,
+`xargs`, `busybox`, `sh -c`), redirections and Windows syntax are analysed; the
+highest risk of any part wins; anything unparseable is treated as at least MEDIUM.
+A command only counts as read-only (and may run in `safe` mode) when nothing in it
+can write files or run other code. The following are therefore never read-only:
+- variables that load or pick other code (`LD_PRELOAD`, `DYLD_*`, `PAGER`,
+  `GIT_EXTERNAL_DIFF`, `BASH_ENV`, …);
+- `git -c …` and `--output`;
+- `sed` `e`/`w`, `sort -o`, and `uniq` with an output file;
+- `awk` redirections, pipes and `system()`;
+- `find -fprint`.
+
+The adversarial test suite (`tests/adversarial/`) pins all of these. The classifier is a policy aid, **not a sandbox**: for
 untrusted repositories or models use `[terminal] sandbox = "docker"` and/or run
 the agent itself in a container (see DEPLOYMENT.md).
 

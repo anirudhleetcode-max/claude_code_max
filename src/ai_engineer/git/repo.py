@@ -270,10 +270,14 @@ class GitRepo:
     # ---- snapshots ------------------------------------------------------------------------
 
     async def _temp_index(self) -> str:
-        fd, path = tempfile.mkstemp(prefix="aie-index-")
-        os.close(fd)
-        os.unlink(path)  # git creates it
-        return path
+        """A path for a throw-away index inside a fresh private (0700) directory, so no other local
+        user can pre-create or redirect it."""
+        directory = tempfile.mkdtemp(prefix="aie-index-")
+        return os.path.join(directory, "index")
+
+    @staticmethod
+    def _drop_temp_index(index: str) -> None:
+        shutil.rmtree(os.path.dirname(index), ignore_errors=True)
 
     async def snapshot_tree(self) -> str:
         """Write the current working tree (honouring .gitignore) to a tree object."""
@@ -296,8 +300,7 @@ class GitRepo:
             await self.run("add", "-A", "--", ".", env=env)
             return (await self.run("write-tree", env=env)).strip()
         finally:
-            if os.path.exists(index):
-                os.unlink(index)
+            self._drop_temp_index(index)
 
     async def snapshot(self, checkpoint_id: str, message: str) -> tuple[str, str]:
         """Create a snapshot commit referenced by ``refs/ai-engineer/checkpoints/<id>``. Returns (commit, tree)."""
@@ -364,8 +367,7 @@ class GitRepo:
             await self.run("read-tree", treeish, env=env)
             await self.run("checkout-index", "-a", "-f", env=env)
         finally:
-            if os.path.exists(index):
-                os.unlink(index)
+            self._drop_temp_index(index)
         # prune now-empty directories left behind by removed files
         for rel in removed:
             parent = (self.root / rel).parent
