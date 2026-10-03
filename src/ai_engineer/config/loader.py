@@ -26,6 +26,13 @@ PROVIDER_KEY_ENVS: dict[str, tuple[str, ...]] = {
 }
 
 
+_ESCAPES = {"n": "\n", "t": "\t", "r": "\r", '"': '"', "\\": "\\"}
+
+
+def _unescape(match: re.Match[str]) -> str:
+    return _ESCAPES.get(match.group(1), "\\" + match.group(1))
+
+
 def parse_dotenv(text: str) -> dict[str, str]:
     """Parse a ``.env`` file: KEY=VALUE lines, optional ``export``, quotes, comments."""
     result: dict[str, str] = {}
@@ -46,8 +53,7 @@ def parse_dotenv(text: str) -> dict[str, str]:
             quote = value[0]
             value = value[1:-1]
             if quote == '"' and "\\" in value:
-                escapes = {"n": "\n", "t": "\t", "r": "\r", '"': '"', "\\": "\\"}
-                value = re.sub(r"\\(.)", lambda m: escapes.get(m.group(1), "\\" + m.group(1)), value)
+                value = re.sub(r"\\(.)", _unescape, value)
         else:
             # strip inline comments for unquoted values
             hash_pos = value.find(" #")

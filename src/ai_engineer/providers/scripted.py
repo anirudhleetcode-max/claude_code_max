@@ -126,7 +126,7 @@ class ScriptedProvider(ModelProvider):
         role = str(req.metadata.get("role", ""))
         if self.responder is not None:
             step: Step = self.responder(req)
-        elif role in self.by_role and self.by_role[role]:
+        elif self.by_role.get(role):
             step = self.by_role[role].pop(0)
         elif self.steps:
             step = self.steps.pop(0)

@@ -149,8 +149,9 @@ class ModelsSettings(_Section):
 
 class PermissionsSettings(_Section):
     mode: Mode = Mode.DEVELOPER
-    # Hard ceiling regardless of mode.
-    max_level: PermissionLevel = PermissionLevel.DEVELOPMENT
+    # Hard ceiling regardless of mode. PRIVILEGED actions always require approval
+    # (or an explicit allow_commands match); set DEVELOPMENT to deny them outright.
+    max_level: PermissionLevel = PermissionLevel.PRIVILEGED
     # fnmatch-style patterns matched against the full command string.
     allow_commands: list[str] = Field(default_factory=list)
     deny_commands: list[str] = Field(default_factory=list)

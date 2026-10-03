@@ -138,7 +138,7 @@ class GoogleProvider(HttpProviderMixin, ModelProvider):
         for part in raw_parts:
             if part.get("thought"):
                 continue  # reasoning summaries are never surfaced
-            if "text" in part and part["text"]:
+            if part.get("text"):
                 content.append(TextBlock(text=part["text"]))
             elif "functionCall" in part:
                 call = part["functionCall"]

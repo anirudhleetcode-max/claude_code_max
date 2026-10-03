@@ -15,7 +15,7 @@ class StateError(AIEngineerError):
     """Persistent state is missing, corrupt, or inconsistent."""
 
 
-class CancelledByUser(AIEngineerError):  # noqa: N818 - reads naturally at raise sites
+class CancelledByUser(AIEngineerError):
     """The user (or a stop request) cancelled the operation."""
 
 
@@ -76,7 +76,7 @@ class RefusalError(ProviderError):
     """The model declined the request."""
 
 
-class CapabilityNotSupported(ProviderError):  # noqa: N818
+class CapabilityNotSupported(ProviderError):
     """The provider or model does not support the requested capability."""
 
     fallback = True
@@ -107,7 +107,7 @@ class ToolValidationError(ToolError):
     """Tool arguments did not match the schema."""
 
 
-class PermissionDenied(ToolError):  # noqa: N818
+class PermissionDenied(ToolError):
     """Policy denied the action."""
 
 
@@ -119,5 +119,5 @@ class PathViolation(PermissionDenied):
     """A path escaped the workspace or touched a protected location."""
 
 
-class ToolTimeout(ToolError):  # noqa: N818
+class ToolTimeout(ToolError):
     """A tool exceeded its timeout."""
