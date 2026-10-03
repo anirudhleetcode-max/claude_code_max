@@ -236,13 +236,14 @@ async def test_read_only_checks_run_concurrently_and_writers_serialize(tmp_path:
     rt.validation.run_check = fake_run_check
     task = rt.create_task("x")
     try:
-        started = time.monotonic()
+        # Overlap is measured by counting checks in flight, not by wall-clock time (slow CI runners
+        # spend variable time persisting results, which made a time bound flaky).
         results = await rt.orchestrator._run_checks_parallel(task, None, [CheckKind.LINT, CheckKind.TYPECHECK])
-        assert time.monotonic() - started < 0.55 and active["peak"] == 2
+        assert active["peak"] == 2  # read-only checks overlap
         assert [r.kind for r in results] == [CheckKind.LINT, CheckKind.TYPECHECK]
         active["peak"] = 0
         started = time.monotonic()
         await rt.orchestrator._run_checks_parallel(task, None, [CheckKind.TEST, CheckKind.BUILD])
-        assert time.monotonic() - started >= 0.55 and active["peak"] == 1  # writers never overlap
+        assert active["peak"] == 1 and time.monotonic() - started >= 0.55  # writers never overlap
     finally:
         await rt.aclose()
