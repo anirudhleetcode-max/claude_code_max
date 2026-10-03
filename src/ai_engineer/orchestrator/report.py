@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from ..core.util import human_duration
+from ..core.util import human_duration, utcnow_iso
 from ..tasks.store import CheckpointRecord, Task, TaskStatus
 from .state import PipelineState
 
@@ -45,7 +45,7 @@ def build_report(
     md += [
         f"- **Task ID:** `{task.id}`",
         f"- **Status:** **{status}**" + (f" — {error}" if error else ""),
-        f"- **Created:** {task.created}  **Finished:** {task.finished or 'n/a'}",
+        f"- **Created:** {task.created}  **Report written:** {task.finished or utcnow_iso()}",
     ]
     if metrics.get("duration_s") is not None:
         md.append(f"- **Duration:** {human_duration(float(metrics['duration_s']))}")

@@ -613,6 +613,31 @@ def cmd_review(args: argparse.Namespace) -> int:
     return asyncio.run(go())
 
 
+def cmd_demo(args: argparse.Namespace) -> int:
+    import tempfile
+
+    from ..demo import run_demo
+
+    root = Path(args.dir).resolve() if args.dir else Path(tempfile.mkdtemp(prefix="aie-demo-")) / "shop"
+    if root.exists() and any(root.iterdir()):
+        _err(f"{root} is not empty; choose a new directory with --dir")
+        return 64
+    _out(f"Demo project: {root}")
+    _out("Model: a fixed scripted transcript (offline, deterministic); tools, tests, git and gates are real.\n")
+    task = asyncio.run(run_demo(root, verbose=args.verbose))
+    state = task.state or {}
+    _out("")
+    _out(f"Task {task.id}: {task.status}")
+    for g in (state.get("gates") or {}).get("results", []):
+        _out(f"  {g['status']:<12} {g['name']:<15} {g.get('detail', '')[:90]}")
+    for sid, st in (state.get("subtasks") or {}).items():
+        _out(f"  subtask {sid}: {st.get('status')}; repair iterations {st.get('repair_iterations', 0)}; commit {(st.get('commit') or '-')[:10]}")
+    if state.get("report_path"):
+        _out(f"Report: {state['report_path']}")
+    _out(f"Explore it: cd {root} && aie logs && aie checkpoint list && git log --oneline")
+    return EXIT.get(task.status, 1)
+
+
 def cmd_doctor(args: argparse.Namespace) -> int:
     from .doctor import FAIL, Doctor, as_json, render
 
@@ -820,6 +845,11 @@ def build_parser() -> argparse.ArgumentParser:
     cd.add_argument("checkpoint_id")
     cd.add_argument("--stat", action="store_true")
     sp.set_defaults(func=cmd_checkpoints, cp_cmd="list", task=None)
+
+    sp = sub.add_parser("demo", help="run a deterministic offline demonstration of the whole pipeline")
+    sp.add_argument("--dir", help="where to create the demo project (default: a new temporary directory)")
+    sp.add_argument("-v", "--verbose", action="store_true")
+    sp.set_defaults(func=cmd_demo)
 
     sp = sub.add_parser("restore", help="restore a checkpoint (the current state is checkpointed first, so it can be undone)")
     sp.add_argument("checkpoint_id")

@@ -146,6 +146,7 @@ printed token.
 | `aie daemon` | continuously run queued tasks and recurring schedules |
 | `aie report` | print a task's engineering report |
 | `aie checkpoints` | list, diff or restore checkpoints |
+| `aie demo` | run a deterministic offline demonstration of the whole pipeline |
 | `aie restore` | restore a checkpoint (the current state is checkpointed first, so it can be undone) |
 | `aie logs` | show a task's activity log (latest task by default) |
 | `aie project` | show what the agent knows about this project, or invalidate it |
