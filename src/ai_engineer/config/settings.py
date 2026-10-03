@@ -155,10 +155,12 @@ class PermissionsSettings(_Section):
     # fnmatch-style patterns matched against the full command string.
     allow_commands: list[str] = Field(default_factory=list)
     deny_commands: list[str] = Field(default_factory=list)
-    # Workspace-relative glob patterns that tools may never write.
+    # Workspace-relative glob patterns that tools may never write (matched case-insensitively).
+    # "**/.git/**" and ".git" also cover nested repositories, submodules and worktree gitfiles.
     protected_paths: list[str] = Field(
         default_factory=lambda: [
-            ".git/**",
+            "**/.git/**",
+            ".git",
             ".agent/**",
             ".env",
             ".env.*",
@@ -169,7 +171,7 @@ class PermissionsSettings(_Section):
             "**/.ssh/**",
         ]
     )
-    # Patterns of files whose *contents* are redacted when read.
+    # Patterns of files whose *contents* are redacted when read (matched case-insensitively).
     secret_files: list[str] = Field(
         default_factory=lambda: [".env", ".env.*", "**/*.pem", "**/*.key", "**/id_rsa*", "**/credentials*"]
     )

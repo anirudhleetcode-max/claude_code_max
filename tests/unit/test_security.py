@@ -102,6 +102,26 @@ def test_path_guard_blocks_escape_and_protected(tmp_path: Path) -> None:
     assert guard.is_secret_file(".env")
 
 
+def test_default_protected_paths_cover_nested_git_and_ignore_case(tmp_path: Path) -> None:
+    # Audit regression: only the top-level .git was protected (a submodule's hooks were writable),
+    # and matching was case-sensitive although ".GIT/hooks" or ".ENV" are the same files on macOS/Windows.
+    from ai_engineer.config.settings import PermissionsSettings
+
+    ws = tmp_path / "ws"
+    (ws / "vendor" / "lib" / ".git" / "hooks").mkdir(parents=True)
+    perms = PermissionsSettings()
+    guard = PathGuard(ws, protected=perms.protected_paths, secret_files=perms.secret_files)
+    for rel in [".git/hooks/pre-commit", "vendor/lib/.git/hooks/pre-commit", "vendor/lib/.git", ".GIT/hooks/x",
+                ".ENV", ".Env.Local", "certs/Server.PEM", ".Agent/config.toml", "home/.SSH/config"]:
+        with pytest.raises(PathViolation):
+            guard.resolve(rel, for_write=True)
+    for rel in [".gitignore", ".github/workflows/ci.yml", "src/.git_helpers.py", "src/app.py"]:
+        guard.resolve(rel, for_write=True)
+    assert guard.is_secret_file(".ENV") and guard.is_secret_file("conf/Credentials.json")
+    assert not glob_match(".ENV", ".env")  # plain glob_match stays case-sensitive (used for search)
+    assert glob_match(".ENV", ".env", ignore_case=True)
+
+
 @pytest.mark.skipif(os.name == "nt", reason="symlinks need privileges on Windows")
 def test_path_guard_blocks_symlink_escape(tmp_path: Path) -> None:
     ws = tmp_path / "ws"
@@ -188,3 +208,35 @@ def test_scan_diff_flags_hardcoded_secret() -> None:
 )
 def test_credential_assignment_separates_literals_from_code(text: str, expected: bool) -> None:
     assert bool(scan_text(text)) is expected
+
+
+def test_secret_file_redaction_keeps_structure_hides_values() -> None:
+    from ai_engineer.security.secrets import redact_secret_file_text
+
+    text = (
+        "DATABASE_URL=postgres://app:pw@db/app\n# a comment\n# OLD_KEY=abc\nexport TOKEN='x'\n\n"
+        "-----BEGIN PRIVATE KEY-----\nMIIEvQIBADAN\n-----END PRIVATE KEY-----\n"
+        '{\n  "private_key": "k",\n  "client_email": "a@b"\n}\n[default]\naws_secret_access_key = abc\n'
+    )
+    out = redact_secret_file_text(text)
+    for value in ("postgres://", "abc", "'x'", "MIIEvQ", '"k"', "a@b"):
+        assert value not in out
+    for kept in ("DATABASE_URL=", "# a comment", "# OLD_KEY=", "export TOKEN=", "-----BEGIN PRIVATE KEY-----", '"private_key": ', "[default]"):
+        assert kept in out
+    assert out.count("\n") == text.count("\n")
+
+
+def test_diff_redaction_tracks_hunks_and_file_sections() -> None:
+    from ai_engineer.security.secrets import redact_secret_files_in_diff
+
+    git_diff = (
+        "diff --git a/.env b/.env\n--- a/.env\n+++ b/.env\n@@ -1,2 +1,3 @@\n KEEP=old\n-PASSWORD=hunter2\n"
+        "+PASSWORD=hunter3\n+--- not a header\ndiff --git a/app.py b/app.py\n--- a/app.py\n+++ b/app.py\n"
+        "@@ -1 +1 @@\n-x = 1\n+x = 2\n"
+    )
+    out = redact_secret_files_in_diff(git_diff, lambda p: p == ".env")
+    assert "hunter" not in out and "KEEP=[REDACTED]" in out and "not a header" not in out
+    assert "-x = 1\n+x = 2\n" in out  # other files untouched
+    plain = "--- a/creds.txt\n+++ b/creds.txt\n@@ -1 +1,2 @@\n-sekrit1\n+sekrit2\n+--- a/fake\n--- a/ok.py\n+++ b/ok.py\n@@ -1 +1 @@\n-a\n+b\n"
+    out = redact_secret_files_in_diff(plain, lambda p: p.startswith("creds"))
+    assert "sekrit" not in out and "-a\n+b\n" in out

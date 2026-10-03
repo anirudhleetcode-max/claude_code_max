@@ -33,9 +33,11 @@ def _glob_regex(pattern: str) -> re.Pattern[str]:
     return re.compile("^" + "".join(out) + "$")
 
 
-def glob_match(rel_path: str, pattern: str) -> bool:
+def glob_match(rel_path: str, pattern: str, *, ignore_case: bool = False) -> bool:
     """gitignore-like matching: patterns without '/' match the basename at any depth."""
     rel = rel_path.replace("\\", "/")
+    if ignore_case:
+        rel, pattern = rel.casefold(), pattern.casefold()
     while rel.startswith("./"):
         rel = rel[2:]
     rel = rel.lstrip("/")
@@ -45,6 +47,12 @@ def glob_match(rel_path: str, pattern: str) -> bool:
         name = rel.rsplit("/", 1)[-1]
         return bool(_glob_regex(pattern).match(name))
     return bool(_glob_regex(pattern.lstrip("/")).match(rel))
+
+
+def _guarded_match(rel_path: str, pattern: str) -> bool:
+    # Case-insensitive on every platform: on macOS/Windows ".GIT/hooks/x" or ".ENV" name the same file
+    # as the protected one, and treating them alike everywhere keeps the policy platform-independent.
+    return glob_match(rel_path, pattern, ignore_case=True)
 
 
 class PathGuard:
@@ -86,7 +94,7 @@ class PathGuard:
         if for_write:
             rel = self.relative(resolved)
             for pattern in self.protected:
-                if glob_match(rel, pattern):
+                if _guarded_match(rel, pattern):
                     raise PathViolation(f"path is protected ({pattern}): {rel}")
         return resolved
 
@@ -99,7 +107,7 @@ class PathGuard:
 
     def is_secret_file(self, path: Path | str) -> bool:
         rel = self.relative(Path(path)) if isinstance(path, Path) else path
-        return any(glob_match(rel, p) for p in self.secret_files)
+        return any(_guarded_match(rel, p) for p in self.secret_files)
 
     def is_protected(self, rel: str) -> bool:
-        return any(glob_match(rel, p) for p in self.protected)
+        return any(_guarded_match(rel, p) for p in self.protected)

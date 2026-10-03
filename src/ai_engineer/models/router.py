@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import functools
 import random
 import time
 from collections.abc import Awaitable, Callable
@@ -12,7 +13,7 @@ from typing import Any, TypeVar
 from pydantic import BaseModel
 
 from ..config.settings import ModelOptions, ModelsSettings
-from ..core.cancel import CancellationToken
+from ..core.cancel import CancellationToken, run_cancellable
 from ..core.errors import (
     AllModelsFailedError,
     ConfigError,
@@ -179,10 +180,11 @@ class FallbackModel:
                 attempts.append(f"{key}: {exc}")
                 continue
             for attempt in range(self.settings.retry.max_attempts):
-                if cancel is not None:
-                    cancel.raise_if_cancelled()
                 try:
-                    result = await op(provider, ref)
+                    if cancel is None:
+                        result = await op(provider, ref)
+                    else:  # a stop/cancel interrupts the in-flight request instead of waiting for it
+                        result = await run_cancellable(functools.partial(op, provider, ref), cancel)
                 except ProviderError as exc:
                     self.stats.failures += 1
                     if exc.retryable and attempt + 1 < self.settings.retry.max_attempts:

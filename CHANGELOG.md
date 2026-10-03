@@ -33,7 +33,8 @@ All notable changes to this project are documented here. The format follows
   queues, schedules and a daemon.
 - Layered memory with versioning, confidence, staleness detection and FTS search.
 - Observability: typed events, redacted traces, metrics, terminal renderer, web
-  dashboard with live activity, approvals and diffs.
+  dashboard (token-protected, localhost by default) with live activity, plan and
+  subtasks, gates, approvals, questions, checkpoint diffs and reports.
 - Benchmark suite (10 categories, hidden verification, harness and model suites),
   adversarial tests, cross-platform CI, install scripts, Dockerfile, documentation.
 
@@ -48,3 +49,32 @@ All notable changes to this project are documented here. The format follows
 - Test-failure paths kept Windows separators; the repository index kept stale data
   when its database file could not be deleted (Windows file locking).
 - A `.agent/.gitignore` that un-ignored its config made fresh repositories dirty.
+
+### Security and robustness fixes (found by the final audit)
+- `db_query` could create or overwrite SQLite files outside the workspace with
+  `ATTACH DATABASE` or `VACUUM INTO` without approval. Attaching is now disabled
+  on every connection.
+- SQL classification missed unbounded `DELETE`/`ALTER … DROP` on quoted or
+  schema-qualified table names. It also rated `WITH … DELETE` as read-only, but
+  the read-only connection still refused that write. `UPDATE` without `WHERE`
+  now needs approval like `DELETE` without `WHERE`.
+- `git_commit` also committed changes the user had staged separately (unscanned).
+  A broad path such as `.` could commit key or credential files. Commits are now
+  limited to the given paths, and secret and protected files are refused. The
+  pipeline's auto-commit uses the same checks.
+- Only the top-level `.git` was write-protected, so hooks in nested repositories
+  and submodules were writable. Protected and secret-file patterns were also
+  case-sensitive, although `.GIT/hooks` or `.ENV` are the same files on macOS
+  and Windows. Both are fixed.
+- `web_fetch` followed redirects automatically and only checked the final URL,
+  so a public page could make the agent send a request to a local or private
+  address. Every hop is now checked before it is requested. The browser tool
+  refuses cloud metadata endpoints.
+- `read_file` redacted the values in `.env`, key and credential files, but
+  `search_text`, `git_diff` and checkpoint diffs (sent to the reviewer model and
+  shown in reports, the CLI and the dashboard) did not. All of them now apply the
+  same redaction.
+- Stopping a task did not interrupt a model request already in flight; the router
+  now cancels it immediately.
+- Task events are returned in emission order (events emitted within the same
+  millisecond could appear out of order).

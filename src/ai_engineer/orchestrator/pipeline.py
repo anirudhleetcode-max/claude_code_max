@@ -19,7 +19,7 @@ from typing import TYPE_CHECKING, Any
 
 from ..config.settings import GateMode, Mode
 from ..core.cancel import CancellationToken
-from ..core.errors import AllModelsFailedError, CancelledByUser, ConfigError
+from ..core.errors import AllModelsFailedError, CancelledByUser, ConfigError, ToolError
 from ..core.events import EventType
 from ..debugger.failures import FailureTracker
 from ..executor.loop import AgentLoop, LoopLimits, LoopResult
@@ -32,6 +32,7 @@ from ..security.secrets import scan_text
 from ..security.static_rules import added_lines_by_file
 from ..tasks.store import Task, TaskStatus
 from ..tools.approval import ApprovalRequest
+from ..tools.builtin.git_tools import stage_for_commit
 from .state import PipelineState, SubtaskState
 
 if TYPE_CHECKING:
@@ -720,19 +721,19 @@ class Orchestrator:
         if git is None:
             return None
         paths = st.files_changed
+        if not paths:
+            return None
         try:
-            await git.run("add", "-A", "--", *paths)
-            staged = await git.diff(staged=True)
-            added = "\n".join(line[1:] for line in staged.splitlines() if line.startswith("+") and not line.startswith("+++"))
-            if scan_text(added):
-                await git.run("reset", "-q", "--", *paths)
-                st.notes.append("not committed: staged changes contain possible secrets")
-                self._emit(EventType.WARNING, f"Not committing {sub.id}: possible secrets in staged changes")
+            try:
+                staged_files = await stage_for_commit(git, self.rt.tool_ctx.guard, paths)
+            except ToolError as exc:
+                st.notes.append(f"not committed: {exc}")
+                self._emit(EventType.WARNING, f"Not committing {sub.id}: {exc}")
                 return None
-            if not staged.strip():
+            if not staged_files:
                 return None
             message = f"{self.settings.git.commit_prefix}{sub.title}\n\nTask: {task.id}\nSubtask: {sub.id}\nVerification: {verdict}\n"
-            sha = await git.commit(message)
+            sha = await git.commit(message, only=paths)
         except Exception as exc:
             st.notes.append(f"commit failed: {exc}")
             self._emit(EventType.WARNING, f"Commit for {sub.id} failed: {exc}")

@@ -254,12 +254,16 @@ class GitRepo:
         if paths:
             await self.run("add", "--", *paths)
 
-    async def commit(self, message: str, paths: list[str] | None = None, allow_empty: bool = False) -> str:
+    async def commit(self, message: str, paths: list[str] | None = None, allow_empty: bool = False, only: list[str] | None = None) -> str:
+        """Commit the index. With ``only``, commit just those pathspecs and leave anything else the
+        user has staged untouched (``git commit -- <paths>``)."""
         if paths is not None:
             await self.add(paths)
         args = ["commit", "-q", "-F", "-"]
         if allow_empty:
             args.append("--allow-empty")
+        if only:
+            args += ["--", *only]
         await self.run(*args, input_text=message)
         return (await self.run("rev-parse", "HEAD")).strip()
 

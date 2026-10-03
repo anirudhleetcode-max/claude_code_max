@@ -113,7 +113,9 @@ class Runtime:
             repo_index=self.index, memory=self.memory, validation=self.validation, git=self.git, profile=self.profile,
         )
         self.context = ContextBuilder(self.workspace, self.profile, self.index, self.memory, self.redactor)
-        self.checkpoints = CheckpointManager(self.workspace, self.store, self.tool_ctx.files, self.state_dir, self.git, self.bus)
+        self.checkpoints = CheckpointManager(
+            self.workspace, self.store, self.tool_ctx.files, self.state_dir, self.git, self.bus, is_secret=self.tool_ctx.guard.is_secret_file
+        )
         recovered = self.store.recover_interrupted()
         for task in recovered:
             self.bus.emit(EventType.TASK_INTERRUPTED, f"recovered interrupted task {task.id}", task_id=task.id)

@@ -321,20 +321,46 @@ class StateStore:
         )
 
     def events(self, task_id: str, limit: int = 500, types: Iterable[str] | None = None) -> list[dict[str, Any]]:
+        """The first ``limit`` events of a task in emission order."""
         sql = "SELECT * FROM events WHERE task_id = ?"
         params: list[Any] = [task_id]
         if types:
             tlist = list(types)
             sql += f" AND type IN ({', '.join('?' for _ in tlist)})"
             params += tlist
-        sql += " ORDER BY ts, id LIMIT ?"
+        # ids and timestamps have millisecond resolution; rowid preserves insertion (= emission) order
+        sql += " ORDER BY rowid LIMIT ?"
         params.append(limit)
-        out = []
-        for row in self._exec(sql, params).fetchall():
-            item = dict(row)
-            item["data"] = json.loads(item["data"] or "{}")
-            out.append(item)
-        return out
+        return [self._event_row(row) for row in self._exec(sql, params).fetchall()]
+
+    def events_page(self, task_id: str, after: str | None = None, limit: int = 500) -> tuple[list[dict[str, Any]], bool, bool]:
+        """Events in emission order: ``(events, has_more, reset)``.
+
+        Without ``after`` the latest ``limit`` events are returned; with it, the events that follow
+        it (``reset`` is True when ``after`` is unknown, and the latest events are returned instead).
+        """
+        cols = "id, ts, task_id, subtask_id, type, stage, level, message, data"
+        if after is not None:
+            anchor = self._exec("SELECT rowid FROM events WHERE id = ? AND task_id = ?", (after, task_id)).fetchone()
+            if anchor is not None:
+                rows = self._exec(
+                    f"SELECT {cols} FROM events WHERE task_id = ? AND rowid > ? ORDER BY rowid LIMIT ?",  # noqa: S608
+                    (task_id, anchor[0], limit + 1),
+                ).fetchall()
+                return [self._event_row(r) for r in rows[:limit]], len(rows) > limit, False
+        rows = self._exec(
+            f"SELECT {cols} FROM events WHERE task_id = ? ORDER BY rowid DESC LIMIT ?", (task_id, limit + 1)  # noqa: S608
+        ).fetchall()
+        return [self._event_row(r) for r in reversed(rows[:limit])], len(rows) > limit, after is not None
+
+    @staticmethod
+    def _event_row(row: sqlite3.Row) -> dict[str, Any]:
+        item = dict(row)
+        try:
+            item["data"] = json.loads(item.get("data") or "{}")
+        except ValueError:
+            item["data"] = {}
+        return item
 
     # ---- checkpoints -------------------------------------------------------------------------
 

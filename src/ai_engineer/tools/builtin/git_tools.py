@@ -11,7 +11,8 @@ from ...core.errors import ToolError
 from ...core.events import EventType
 from ...core.util import truncate_middle
 from ...git.repo import GitError, GitRepo
-from ...security.secrets import scan_text
+from ...security.paths import PathGuard
+from ...security.secrets import redact_secret_files_in_diff, scan_text
 from ..base import ActionAssessment, SideEffect, Tool, ToolContext, ToolInput, ToolResult
 
 _BRANCH_RE = re.compile(r"^(?!-)(?!.*\.\.)(?!.*//)[A-Za-z0-9._/\-]{1,100}(?<!\.lock)(?<!/)$")
@@ -21,6 +22,30 @@ def _git(ctx: ToolContext) -> GitRepo:
     if ctx.git is None:
         raise ToolError("this workspace is not a git repository")
     return ctx.git
+
+
+async def stage_for_commit(git: GitRepo, guard: PathGuard, paths: list[str]) -> list[str]:
+    """Stage exactly ``paths`` and return the staged file list, or unstage them and raise ToolError when
+    they include secret/protected files or the added lines contain possible secrets."""
+    if not paths:
+        return []
+    await git.run("add", "-A", "--", *paths)
+    staged_files = [f for f in (await git.run("diff", "--cached", "--name-only", "-z", "--", *paths)).split("\0") if f]
+    blocked = [f for f in staged_files if guard.is_secret_file(f) or (guard.is_protected(f) and not f.startswith(".agent/"))]
+    if blocked:
+        await git.run("reset", "-q", "--", *paths)
+        raise ToolError(
+            f"refusing to commit secret or protected files: {', '.join(blocked[:10])}; "
+            "the agent does not commit these — leave them out (the user can commit them deliberately)"
+        )
+    staged = await git.diff(staged=True, paths=paths)
+    added = "\n".join(line[1:] for line in staged.splitlines() if line.startswith("+") and not line.startswith("+++"))
+    secrets = scan_text(added)
+    if secrets:
+        await git.run("reset", "-q", "--", *paths)
+        kinds = ", ".join(sorted({s.kind for s in secrets}))
+        raise ToolError(f"refusing to commit: staged changes contain possible secrets ({kinds}); remove them first")
+    return staged_files
 
 
 class GitStatusInput(ToolInput):
@@ -61,6 +86,7 @@ class GitDiffTool(Tool):
         for p in args.paths:
             ctx.guard.resolve(p)
         diff = await _git(ctx).diff(staged=args.staged, base=args.base, paths=args.paths or None, stat=args.stat)
+        diff = redact_secret_files_in_diff(diff, ctx.guard.is_secret_file)
         return ToolResult(content=truncate_middle(diff, 60000) or "(no differences)")
 
 
@@ -144,8 +170,9 @@ class GitCommitInput(ToolInput):
 class GitCommitTool(Tool):
     name = "git_commit"
     description = (
-        "Commit specific files (by default only the files the agent changed in this session). "
-        "The staged diff is scanned for secrets first; commits containing secrets are refused."
+        "Commit specific files (by default only the files the agent changed in this session). Only those paths "
+        "are committed; other staged changes are left alone. Secret/protected files and diffs containing "
+        "secrets are refused."
     )
     Input = GitCommitInput
     level = PermissionLevel.DEVELOPMENT
@@ -169,19 +196,13 @@ class GitCommitTool(Tool):
             rel = ctx.guard.relative(ctx.guard.resolve(p))
             if ctx.guard.is_protected(rel) and not rel.startswith(".agent/"):
                 raise ToolError(f"refusing to commit protected path {rel}")
-        await git.run("add", "-A", "--", *paths)
-        staged = await git.diff(staged=True, paths=paths)
-        added = "\n".join(line[1:] for line in staged.splitlines() if line.startswith("+") and not line.startswith("+++"))
-        secrets = scan_text(added)
-        if secrets:
-            await git.run("reset", "-q", "--", *paths)
-            kinds = ", ".join(sorted({s.kind for s in secrets}))
-            raise ToolError(f"refusing to commit: staged changes contain possible secrets ({kinds}); remove them first")
-        if not staged.strip():
+        staged_files = await stage_for_commit(git, ctx.guard, paths)
+        if not staged_files:
             return ToolResult(content="nothing to commit (no changes in the given paths)")
-        sha = await git.commit(args.message)
-        ctx.bus.emit(EventType.COMMIT_CREATED, f"committed {sha[:10]}: {args.message.splitlines()[0]}", data={"sha": sha, "paths": paths})
-        return ToolResult(content=f"committed {sha[:10]} ({len(paths)} file(s))", data={"sha": sha, "files_changed": paths})
+        # Commit only these paths: changes the user staged elsewhere are neither committed nor scanned.
+        sha = await git.commit(args.message, only=paths)
+        ctx.bus.emit(EventType.COMMIT_CREATED, f"committed {sha[:10]}: {args.message.splitlines()[0]}", data={"sha": sha, "paths": staged_files})
+        return ToolResult(content=f"committed {sha[:10]} ({len(staged_files)} file(s))", data={"sha": sha, "files_changed": staged_files})
 
 
 GIT_TOOLS: list[type[Tool]] = [GitStatusTool, GitDiffTool, GitLogTool, GitBranchTool, GitCheckoutTool, GitCommitTool]

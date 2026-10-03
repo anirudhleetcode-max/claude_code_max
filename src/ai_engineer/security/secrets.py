@@ -10,7 +10,7 @@ from __future__ import annotations
 import math
 import os
 import re
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from typing import Any
 
@@ -180,6 +180,80 @@ def secret_env_values(environ: Mapping[str, str] | None = None) -> set[str]:
 
 def is_secret_env_name(name: str) -> bool:
     return bool(_SECRET_ENV_NAME.search(name)) and not _SAFE_ENV_NAMES.search(name)
+
+
+# ---- secret files (.env, keys, credentials) ---------------------------------------------------
+
+# KEY=value / KEY: value / export KEY=value / "key": value, optionally commented out: keep the name.
+_SECRET_FILE_NAMED = re.compile(r"""^(\s*#?\s*(?:export\s+)?(?:[A-Za-z_][A-Za-z0-9_.\-]*|"[^"\n]+"|'[^'\n]+')\s*[=:]\s*)\S.*$""")
+_SECRET_FILE_KEEP = re.compile(r"^\s*(#.*|-----(BEGIN|END) [A-Z0-9 ]+-----|\[[^\]=]*\]|[{}\[\],]*)\s*$")
+
+
+def redact_secret_line(line: str) -> str:
+    """Redact one line of a secret file: values are hidden, names, comments and structure are kept."""
+    m = _SECRET_FILE_NAMED.match(line)
+    if m:
+        return m.group(1) + REDACTED
+    if _SECRET_FILE_KEEP.match(line):
+        return line
+    return REDACTED
+
+
+def redact_secret_file_text(text: str) -> str:
+    """Contents of a file matched by ``secret_files``, safe to show to a model, a log or the UI."""
+    out = []
+    for line in text.splitlines(keepends=True):
+        body = line.rstrip("\r\n")
+        out.append((redact_secret_line(body) if body.strip() else body) + line[len(body):])
+    return "".join(out)
+
+
+_GIT_HEADER = re.compile(r"^diff --git a/(.+?) b/(.+)$")
+_HUNK = re.compile(r"^@@ -\d+(?:,(\d+))? \+\d+(?:,(\d+))? @@")
+
+
+def _diff_path(header: str) -> str | None:
+    path = header[4:].split("\t", 1)[0].strip()
+    if path == "/dev/null":
+        return None
+    return path[2:] if path.startswith(("a/", "b/")) else path
+
+
+def redact_secret_files_in_diff(diff: str, is_secret: Callable[[str], bool]) -> str:
+    """Redact the changed and context lines of every file section whose path ``is_secret``.
+
+    Handles git and plain unified diffs; hunk line counts are tracked so content lines that start
+    with ``---``/``+++`` are never mistaken for file headers.
+    """
+    out: list[str] = []
+    secret = False
+    old_left = new_left = 0
+    for line in diff.splitlines(keepends=True):
+        body = line.rstrip("\r\n")
+        end = line[len(body):]
+        if old_left > 0 or new_left > 0:
+            tag = body[:1]
+            if tag in (" ", ""):
+                old_left, new_left = old_left - 1, new_left - 1
+            elif tag == "-":
+                old_left -= 1
+            elif tag == "+":
+                new_left -= 1
+            if secret and tag in (" ", "-", "+") and body[1:].strip():
+                body = tag + redact_secret_line(body[1:])
+        elif m := _GIT_HEADER.match(body):
+            secret = is_secret(m.group(1)) or is_secret(m.group(2))
+        elif body.startswith("--- "):
+            path = _diff_path(body)
+            secret = bool(path) and is_secret(path)  # type: ignore[arg-type]
+        elif body.startswith("+++ "):
+            path = _diff_path(body)
+            secret = secret or (bool(path) and is_secret(path))  # type: ignore[arg-type]
+        elif m := _HUNK.match(body):
+            old_left = int(m.group(1)) if m.group(1) is not None else 1
+            new_left = int(m.group(2)) if m.group(2) is not None else 1
+        out.append(body + end)
+    return "".join(out)
 
 
 class Redactor:

@@ -16,12 +16,14 @@ from __future__ import annotations
 import difflib
 import json
 import shutil
+from collections.abc import Callable
 from pathlib import Path
 
 from ..core.events import EventBus, EventType
 from ..core.ids import new_id
 from ..core.util import atomic_write_json
 from ..git.repo import GitRepo
+from ..security.secrets import redact_secret_files_in_diff
 from ..tools.file_state import FileStateTracker
 from .store import CheckpointRecord, StateStore
 
@@ -48,8 +50,10 @@ class CheckpointManager:
         state_dir: Path,
         git: GitRepo | None = None,
         bus: EventBus | None = None,
+        is_secret: Callable[[str], bool] | None = None,
     ) -> None:
         self.workspace = workspace
+        self.is_secret = is_secret
         self.store = store
         self.files = files
         self.dir = state_dir / "checkpoints"
@@ -126,7 +130,7 @@ class CheckpointManager:
                 relevant = [p for p in relevant if p in paths]
             if not relevant:
                 return ""
-            return await self.git.diff_since(record.tree, stat=stat, paths=relevant)
+            return self._redact(await self.git.diff_since(record.tree, stat=stat, paths=relevant), stat)
         chunks = []
         for rel in await self.changed_files_since(cp_id):
             if paths and rel not in paths:
@@ -142,7 +146,13 @@ class CheckpointManager:
                 chunks.append(f" {rel} | +{added} -{removed}\n")
             else:
                 chunks.append("".join(difflib.unified_diff(a, b, f"a/{rel}" if before is not None else "/dev/null", f"b/{rel}" if after is not None else "/dev/null")))
-        return "".join(chunks)
+        return self._redact("".join(chunks), stat)
+
+    def _redact(self, diff: str, stat: bool) -> str:
+        """Diffs go to the reviewer model, reports, the CLI and the dashboard: hide secret-file values."""
+        if stat or self.is_secret is None:
+            return diff
+        return redact_secret_files_in_diff(diff, self.is_secret)
 
     async def restore(self, cp_id: str) -> tuple[CheckpointRecord, list[str]]:
         """Restore the workspace to ``cp_id``. Returns (safety checkpoint, restored/removed paths)."""

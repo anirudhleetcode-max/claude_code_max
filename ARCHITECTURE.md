@@ -205,9 +205,9 @@ not offered `git_commit`, `git_branch` or `git_checkout`.
 | Mode | Ceiling | Behaviour |
 |---|---|---|
 | `safe` | READ_ONLY | analysis and recommendations only |
-| `assisted` | DEVELOPMENT | user approves every write and command beyond read-only |
-| `developer` | DEVELOPMENT | normal development actions automatic; high risk asks |
-| `autonomous` | DEVELOPMENT | runs a plan with minimal intervention; high risk asks if a human is attached, otherwise denied |
+| `assisted` | PRIVILEGED (approval) | user approves every write and command beyond read-only |
+| `developer` | PRIVILEGED (approval) | normal development actions automatic; high risk asks |
+| `autonomous` | PRIVILEGED (approval) | runs a plan with minimal intervention; high risk asks if a human is attached, otherwise denied |
 
 `CRITICAL` commands (disk formatting, recursive deletion of `/` or home, fork bombs,
 privilege escalation tricks, …) are always denied. The agent never attempts to

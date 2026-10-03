@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import os
 from typing import Any, Literal
+from urllib.parse import urlparse
 
 from pydantic import Field
 
@@ -16,6 +17,7 @@ from ...core.ids import short_id
 from ...core.util import truncate_middle
 from ...security.command_risk import Risk
 from ..base import ActionAssessment, SideEffect, Tool, ToolContext, ToolInput, ToolResult
+from .web import METADATA_HOSTS
 
 
 class BrowserSession:
@@ -91,6 +93,9 @@ class BrowserTool(Tool):
             if args.action == "goto":
                 if not args.url or not args.url.startswith(("http://", "https://")):
                     raise ToolError("goto needs an http(s) url")
+                # localhost is allowed (verifying the app under development); cloud metadata never is
+                if (urlparse(args.url).hostname or "").lower().strip("[]") in METADATA_HOSTS:
+                    raise ToolError("cloud metadata endpoints are never opened")
                 resp = await page.goto(args.url, timeout=args.timeout_ms)
                 status = resp.status if resp is not None else "?"
                 return ToolResult(content=f"loaded {page.url} (HTTP {status}); title: {await page.title()}")

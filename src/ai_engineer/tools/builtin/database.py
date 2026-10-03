@@ -6,6 +6,7 @@ import asyncio
 import re
 import sqlite3
 from pathlib import Path
+from urllib.parse import quote
 
 from pydantic import Field
 
@@ -15,7 +16,17 @@ from ...security.command_risk import Risk
 from ..base import ActionAssessment, SideEffect, Tool, ToolContext, ToolInput, ToolResult
 
 _READ_SQL = re.compile(r"^\s*(select|with|explain|pragma\s+(table_info|index_list|foreign_key_list|table_xinfo)|values)\b", re.I)
-_DESTRUCTIVE_SQL = re.compile(r"\b(drop\s+(table|index|view|trigger|database)|truncate|delete\s+from\s+\w+\s*;?\s*$|alter\s+table\s+\w+\s+drop)\b", re.I)
+# SQLite allows a CTE in front of INSERT/UPDATE/DELETE, so a leading WITH alone does not mean read-only.
+_CTE_DML = re.compile(r"\b(insert\s+(or\s+\w+\s+)?into|replace\s+into|delete\s+from|update\b[\s\S]*?\bset)\b", re.I)
+_IDENT = r"""(?:[\w$]+|"[^"]+"|`[^`]+`|\[[^\]]+\])"""
+_TABLE = rf"{_IDENT}(?:\s*\.\s*{_IDENT})?"
+_DESTRUCTIVE_SQL = re.compile(
+    rf"\b(?:drop\s+(?:table|index|view|trigger|database)\b|truncate\b"
+    rf"|delete\s+from\s+{_TABLE}\s*;?\s*$"
+    rf"|update\s+(?:or\s+\w+\s+)?{_TABLE}\s+set\b(?![\s\S]*\bwhere\b)"
+    rf"|alter\s+table\s+{_TABLE}\s+drop\b)",
+    re.I,
+)
 
 
 def classify_sql(sql: str) -> tuple[Risk, bool]:
@@ -23,7 +34,7 @@ def classify_sql(sql: str) -> tuple[Risk, bool]:
     statements = [s for s in sql.split(";") if s.strip()]
     if not statements:
         return Risk.LOW, True
-    if all(_READ_SQL.match(s) for s in statements):
+    if all(_READ_SQL.match(s) and not (s.lstrip()[:4].lower() == "with" and _CTE_DML.search(s)) for s in statements):
         return Risk.LOW, True
     if any(_DESTRUCTIVE_SQL.search(s.strip()) for s in statements):
         return Risk.HIGH, False
@@ -32,8 +43,13 @@ def classify_sql(sql: str) -> tuple[Risk, bool]:
 
 def _connect(path: Path, read_only: bool) -> sqlite3.Connection:
     if read_only:
-        return sqlite3.connect(f"file:{path.as_posix()}?mode=ro", uri=True, timeout=10)
-    return sqlite3.connect(str(path), timeout=10)
+        con = sqlite3.connect(f"file:{quote(path.as_posix(), safe='/:')}?mode=ro", uri=True, timeout=10)
+    else:
+        con = sqlite3.connect(str(path), timeout=10)
+    # The path guard only checks the main database file. ATTACH and VACUUM INTO name other files
+    # (anywhere on disk), so attaching is disabled outright; VACUUM uses the same mechanism.
+    con.setlimit(sqlite3.SQLITE_LIMIT_ATTACHED, 0)
+    return con
 
 
 class DbSchemaInput(ToolInput):
@@ -78,7 +94,8 @@ class DbQueryTool(Tool):
     name = "db_query"
     description = (
         "Run SQL against a SQLite database file. SELECT/EXPLAIN run read-only; data or schema changes need "
-        "development permission and destructive statements (DROP, TRUNCATE, DELETE without WHERE) need approval."
+        "development permission and destructive statements (DROP, TRUNCATE, DELETE or UPDATE without WHERE) need "
+        "approval. ATTACH and VACUUM are not available."
     )
     Input = DbQueryInput
     side_effect = SideEffect.WRITE
@@ -120,6 +137,8 @@ class DbQueryTool(Tool):
         try:
             cols, rows, changed = await asyncio.to_thread(work)
         except sqlite3.Error as exc:
+            if "too many attached databases" in str(exc):
+                raise ToolError("ATTACH and VACUUM are disabled in db_query: they read or write files outside the guarded database path") from exc
             raise ToolError(f"SQL error: {exc}") from exc
         if not read_only:
             ctx.files.after_write(path)

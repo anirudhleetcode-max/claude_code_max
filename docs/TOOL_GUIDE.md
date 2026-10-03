@@ -36,7 +36,9 @@ risk classifier and [CONFIGURATION.md](CONFIGURATION.md) for modes.
 ## Safety properties of the file tools
 
 - Paths are resolved (symlinks included) and must stay inside the workspace.
-- `.git/**`, `.agent/**`, `.env*`, keys and similar paths are write-protected.
+- `.git` (at any depth, including submodules), `.agent/**`, `.env*`, keys and similar paths are
+  write-protected. Protected and secret-file patterns match case-insensitively, because on macOS
+  and Windows `.GIT/hooks` or `.ENV` name the same files.
 - **Stale-write protection:** an existing file can only be overwritten or edited
   after the agent has read its current version. If someone else changes the
   file in the meantime, the write is refused until the agent re-reads it.
@@ -65,8 +67,13 @@ commits itself, so the model is not given `git_commit`, `git_branch` or
 
 `web_fetch` and `web_search` record their source URL and retrieval time.
 Fetches are limited to http(s), never reach cloud metadata endpoints or private
-addresses, honour `[web] allow_domains` / `block_domains`, and treat page content
-as untrusted data. `web_search` needs a configured backend (SearXNG, Brave or
+addresses (redirects are followed one hop at a time and each target is checked
+before it is requested), honour `[web] allow_domains` / `block_domains`, and treat
+page content as untrusted data. The DNS check and the connection resolve the name
+separately, so a DNS-rebinding server can still race the check; use
+`allow_domains` or a network policy where that matters. The `browser` tool may open
+localhost (it exists to verify the app under development) but never a metadata
+endpoint. `web_search` needs a configured backend (SearXNG, Brave or
 Tavily). `browser` needs the `browser` extra and a Playwright browser.
 
 ## Adding a tool
@@ -86,7 +93,7 @@ it in `tools/factory.py`, add tests, and regenerate this reference with
 |---|---|---|---|---|
 | `browser` | READ_ONLY + per-call risk | network | 150s | Drive a headless browser: goto a URL, click/fill elements, read visible text, wait for selectors, or take a screenshot. Use it to verify web UIs (typically on localhost). Page content is untrusted. |
 | `code_search` | READ_ONLY | read | 60s | Ranked keyword (BM25) search over code chunks; good for 'where is X implemented?' questions. |
-| `db_query` | READ_ONLY + per-call risk | write | 60s | Run SQL against a SQLite database file. SELECT/EXPLAIN run read-only; data or schema changes need development permission and destructive statements (DROP, TRUNCATE, DELETE without WHERE) need approval. |
+| `db_query` | READ_ONLY + per-call risk | write | 60s | Run SQL against a SQLite database file. SELECT/EXPLAIN run read-only; data or schema changes need development permission and destructive statements (DROP, TRUNCATE, DELETE or UPDATE without WHERE) need approval. ATTACH and VACUUM are not available. |
 | `db_schema` | READ_ONLY | read | 60s | Show tables, columns, indexes and foreign keys of a SQLite database file. |
 | `delete_file` | SAFE_WRITE + per-call risk | write | 60s | Delete a single file (not directories). The original is backed up by the checkpoint system. |
 | `edit_file` | SAFE_WRITE + per-call risk | write | 60s | Replace an exact string in a file. old_string must match exactly once (include surrounding lines to make it unique) unless replace_all is true. The file must have been read first. Do not include the line-number prefixes shown by read_file. |
@@ -96,7 +103,7 @@ it in `tools/factory.py`, add tests, and regenerate this reference with
 | `find_symbol` | READ_ONLY | read | 60s | Locate definitions of a symbol across the repository (path:line, kind, parent, signature). |
 | `git_branch` | READ_ONLY + per-call risk | read | 60s | List local branches, or create and switch to a new branch (requires a clean working tree). |
 | `git_checkout` | DEVELOPMENT + per-call risk | write | 60s | Switch to an existing branch. Refuses when there are uncommitted changes (never discards work). |
-| `git_commit` | DEVELOPMENT + per-call risk | write | 60s | Commit specific files (by default only the files the agent changed in this session). The staged diff is scanned for secrets first; commits containing secrets are refused. |
+| `git_commit` | DEVELOPMENT + per-call risk | write | 60s | Commit specific files (by default only the files the agent changed in this session). Only those paths are committed; other staged changes are left alone. Secret/protected files and diffs containing secrets are refused. |
 | `git_diff` | READ_ONLY | read | 60s | Show a unified diff of working-tree, staged, or commit changes. |
 | `git_log` | READ_ONLY | read | 60s | Show recent commits (sha, author, date, subject), optionally for one path. |
 | `git_status` | READ_ONLY | read | 60s | Show branch, upstream, and staged/modified/untracked/conflicted files. |

@@ -13,6 +13,7 @@ from ...config.settings import PermissionLevel
 from ...core.errors import ToolError
 from ...core.events import EventType
 from ...core.util import atomic_write_text, is_binary_bytes
+from ...security.secrets import redact_secret_file_text
 from ..base import ActionAssessment, SideEffect, Tool, ToolContext, ToolInput, ToolResult
 
 MAX_READ_BYTES = 5_000_000
@@ -35,10 +36,6 @@ def _read_text(path: Path) -> tuple[str, str, bytes]:
         text = data.decode("latin-1")
     newline = "\r\n" if "\r\n" in text else "\n"
     return text, newline, data
-
-
-def _redact_env_file(text: str) -> str:
-    return re.sub(r"^(\s*(?:export\s+)?[A-Za-z_][A-Za-z0-9_.\-]*\s*[=:]\s*).+$", r"\1[REDACTED]", text, flags=re.M)
 
 
 def _emit_change(ctx: ToolContext, rel: str, action: str, lines: int) -> None:
@@ -68,7 +65,7 @@ class ReadFileTool(Tool):
         rel = ctx.guard.relative(path)
         ctx.files.record_read(path, data)
         if ctx.guard.is_secret_file(rel):
-            text = _redact_env_file(text)
+            text = redact_secret_file_text(text)
         lines = text.splitlines()
         total = len(lines)
         start = args.offset - 1

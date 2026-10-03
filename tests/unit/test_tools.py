@@ -8,7 +8,7 @@ import pytest
 
 from ai_engineer.config.settings import Mode, PermissionLevel, Settings
 from ai_engineer.core.cancel import CancellationToken
-from ai_engineer.core.errors import CancelledByUser
+from ai_engineer.core.errors import CancelledByUser, ToolError
 from ai_engineer.core.events import EventBus, EventType
 from ai_engineer.core.types import ToolUseBlock
 from ai_engineer.git.repo import GitRepo
@@ -233,6 +233,36 @@ async def test_env_file_values_are_redacted_on_read(tmp_path: Path) -> None:
     assert "DEBUG=[REDACTED]" in r.content and "pw@h" not in r.content
 
 
+async def test_search_and_diffs_do_not_reveal_secret_file_values(git_repo: Path, tmp_path: Path) -> None:
+    # Audit regression: read_file redacted .env/key files, but search_text and diffs showed their values.
+    settings = settings_for()
+    ctx = make_context(git_repo, settings, redactor=Redactor(environ={}), git=GitRepo(git_repo))
+    ex = ToolExecutor(ToolRegistry(default_tools()), PermissionPolicy(settings.permissions), DenyAllBroker())
+    (git_repo / ".env").write_text("SESSION_SALT=q8f7w6e5r4t3\nDEBUG=true\n")
+    (git_repo / "deploy.pem").write_text("-----BEGIN PRIVATE KEY-----\nMIIEvQIBADANBgkq\n-----END PRIVATE KEY-----\n")
+    (git_repo / "app.py").write_text("SALT_NAME = 'SESSION_SALT'\n")
+    r = await ex.execute(call("search_text", pattern="SALT|MIIE"), ctx)
+    assert "q8f7w6e5r4t3" not in r.content and "MIIEvQ" not in r.content
+    assert ".env:1: SESSION_SALT=[REDACTED]" in r.content and "app.py:1: SALT_NAME = 'SESSION_SALT'" in r.content
+    await ctx.git.run("add", "-f", ".env", "app.py")
+    r = await ex.execute(call("git_diff", staged=True), ctx)
+    assert "q8f7w6e5r4t3" not in r.content and "+SESSION_SALT=[REDACTED]" in r.content and "+SALT_NAME" in r.content
+
+    from ai_engineer.tasks.checkpoints import CheckpointManager
+    from ai_engineer.tasks.store import StateStore
+
+    for git in (GitRepo(git_repo), None):  # snapshot and file-backup checkpoints
+        mgr = CheckpointManager(git_repo, StateStore(tmp_path / f"s{git is None}.db"), ctx.files, tmp_path / f"st{git is None}", git, is_secret=ctx.guard.is_secret_file)
+        cp = await mgr.create("before")
+        if git is None:
+            ctx.files.before_write(git_repo / "credentials.ini")
+        (git_repo / "credentials.ini").write_text("[prod]\npassword = Tr0ub4dor&3\n")
+        if git is None:
+            ctx.files.after_write(git_repo / "credentials.ini")
+        diff = await mgr.diff_since(cp.id)
+        assert "credentials.ini" in diff and "Tr0ub4dor" not in diff and "password = [REDACTED]" in diff
+        (git_repo / "credentials.ini").unlink()
+
 async def test_delete_and_list(tmp_path: Path) -> None:
     ws, ctx, ex, _ = harness(tmp_path)
     (ws / "src").mkdir()
@@ -358,6 +388,132 @@ async def test_db_tools(tmp_path: Path) -> None:
     assert not r.is_error
     r = await ex.execute(call("db_query", database="app.db", sql="DROP TABLE users"), ctx)
     assert r.is_error and "not approved" in r.content  # high risk needs a human
+
+
+async def test_web_fetch_checks_redirect_targets_before_requesting(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # Audit regression: redirects were followed automatically and only the final URL was checked, so a
+    # public page could make the agent send a request to a local service (blind SSRF).
+    import threading
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    from ai_engineer.tools.builtin import web
+
+    for var in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"):
+        monkeypatch.delenv(var, raising=False)
+    hits: list[str] = []
+
+    class Internal(BaseHTTPRequestHandler):
+        def do_GET(self) -> None:
+            hits.append(self.path)
+            self.send_response(200)
+            self.send_header("Content-Type", "text/plain")
+            self.end_headers()
+            self.wfile.write(b"internal page")
+
+        def log_message(self, *a: object) -> None:
+            pass
+
+    internal = ThreadingHTTPServer(("127.0.0.1", 0), Internal)
+    port = internal.server_address[1]
+
+    class Redirector(BaseHTTPRequestHandler):
+        def do_GET(self) -> None:
+            target = "localhost" if self.path == "/to-local" else "127.0.0.1"
+            self.send_response(302)
+            self.send_header("Location", f"http://{target}:{port}/admin")
+            self.end_headers()
+
+        def log_message(self, *a: object) -> None:
+            pass
+
+    redirector = ThreadingHTTPServer(("127.0.0.1", 0), Redirector)
+    for server in (internal, redirector):
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+    # treat 127.0.0.1 as a public host so the initial URL passes; "localhost" stays local
+    monkeypatch.setattr(web, "_host_is_private", lambda host: host != "127.0.0.1")
+    ctx = make_context(tmp_path, Settings(), redactor=Redactor(environ={}))
+    base = f"http://127.0.0.1:{redirector.server_address[1]}"
+    try:
+        with pytest.raises(ToolError, match="private or local"):
+            await web.WebFetchTool().run(web.WebFetchInput(url=f"{base}/to-local"), ctx)
+        assert hits == []  # the local target was never requested
+        r = await web.WebFetchTool().run(web.WebFetchInput(url=f"{base}/to-public"), ctx)
+        assert "internal page" in r.content and hits == ["/admin"]  # allowed redirects still work
+    finally:
+        internal.shutdown()
+        redirector.shutdown()
+
+async def test_browser_never_opens_cloud_metadata(tmp_path: Path) -> None:
+    from ai_engineer.tools.builtin.browser import BrowserInput, BrowserTool
+
+    class NoBrowser:  # the check must happen before any navigation
+        async def ensure(self, executable: str | None = None) -> object:
+            return object()
+
+    ctx = make_context(tmp_path, Settings(), redactor=Redactor(environ={}))
+    ctx.state["browser"] = NoBrowser()
+    for url in ["http://169.254.169.254/latest/meta-data/", "http://[fd00:ec2::254]/", "http://metadata.google.internal/"]:
+        with pytest.raises(ToolError, match="metadata"):
+            await BrowserTool().run(BrowserInput(action="goto", url=url), ctx)
+
+async def test_db_query_cannot_reach_files_outside_the_database(tmp_path: Path) -> None:
+    # Audit regression: ATTACH / VACUUM INTO (MEDIUM risk, no approval) created files outside the workspace.
+    import sqlite3
+
+    ws, ctx, ex, _ = harness(tmp_path)
+    con = sqlite3.connect(ws / "app.db")
+    con.execute("CREATE TABLE t (a)")
+    con.commit()
+    con.close()
+    outside = tmp_path / "outside.db"
+    for sql in [f"ATTACH DATABASE '{outside.as_posix()}' AS o; CREATE TABLE o.x (a);", f"VACUUM INTO '{outside.as_posix()}'"]:
+        r = await ex.execute(call("db_query", database="app.db", sql=sql), ctx)
+        assert r.is_error and "ATTACH and VACUUM are disabled" in r.content, r.content
+    assert not outside.exists()
+    r = await ex.execute(call("db_query", database="app.db", sql="SELECT count(*) AS n FROM t"), ctx)
+    assert not r.is_error and r.content.splitlines() == ["n", "0"]
+
+
+@pytest.mark.parametrize(
+    ("sql", "risk", "read_only"),
+    [
+        ("SELECT replace(a, 'update', 'x') FROM t WHERE a = 'delete from'", Risk.LOW, True),
+        ("WITH c AS (SELECT 1) DELETE FROM t", Risk.HIGH, False),
+        ("WITH c AS (SELECT 1) INSERT INTO t SELECT * FROM c", Risk.MEDIUM, False),
+        ('DELETE FROM "t"', Risk.HIGH, False),
+        ("DELETE FROM main.t;", Risk.HIGH, False),
+        ("DELETE FROM [t]", Risk.HIGH, False),
+        ("DELETE FROM t WHERE id = 1", Risk.MEDIUM, False),
+        ("UPDATE t SET a = 1", Risk.HIGH, False),
+        ("UPDATE t SET a = 1 WHERE id = 2", Risk.MEDIUM, False),
+        ('ALTER TABLE "t" DROP COLUMN a', Risk.HIGH, False),
+        ("SELECT dropped FROM t", Risk.LOW, True),
+    ],
+)
+def test_classify_sql(sql: str, risk: Risk, read_only: bool) -> None:
+    from ai_engineer.tools.builtin.database import classify_sql
+
+    assert classify_sql(sql) == (risk, read_only)
+
+
+async def test_git_commit_is_scoped_and_refuses_secret_files(git_repo: Path) -> None:
+    # Audit regression: git_commit committed whatever the user had staged, and paths=["."] committed key files.
+    settings = settings_for()
+    ctx = make_context(git_repo, settings, redactor=Redactor(environ={}), git=GitRepo(git_repo))
+    ex = ToolExecutor(ToolRegistry(default_tools()), PermissionPolicy(settings.permissions), AllowAllBroker())
+    (git_repo / "user_work.py").write_text("u = 1\n")
+    await ctx.git.run("add", "user_work.py")  # the user's own staged change
+    await ex.execute(call("write_file", path="agent.py", content="a = 1\n"), ctx)
+    r = await ex.execute(call("git_commit", message="agent change", paths=["agent.py"]), ctx)
+    assert not r.is_error and "(1 file(s))" in r.content, r.content
+    assert (await ctx.git.run("show", "--name-only", "--format=", "HEAD")).split() == ["agent.py"]
+    assert "user_work.py" in (await ctx.git.status()).staged  # left staged, not committed
+    (git_repo / "deploy.key").write_text("opaque\n")
+    (git_repo / "agent.py").write_text("a = 2\n")
+    r = await ex.execute(call("git_commit", message="everything", paths=["."]), ctx)
+    assert r.is_error and "deploy.key" in r.content
+    assert (await ctx.git.run("log", "-1", "--format=%s")).strip() == "agent change"
+    assert "deploy.key" not in (await ctx.git.status()).staged
 
 
 def test_html_to_text_and_url_checks() -> None:

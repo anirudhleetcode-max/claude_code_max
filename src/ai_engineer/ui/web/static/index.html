@@ -1,0 +1,214 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="referrer" content="no-referrer">
+  <meta name="color-scheme" content="light dark">
+  <title>AI Engineer</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="/static/app.css">
+  <script src="/static/app.js" defer></script>
+</head>
+<body>
+  <a class="skip-link" href="#main">Skip to task details</a>
+
+  <header class="topbar">
+    <div class="brand">
+      <span class="logo" aria-hidden="true">◆</span>
+      <div class="brand-text">
+        <h1>AI Engineer</h1>
+        <p class="project" id="project">Connecting…</p>
+      </div>
+    </div>
+    <ul class="chips" aria-label="Session settings">
+      <li class="chip" id="chip-mode" title="Default operating mode for new tasks">mode</li>
+      <li class="chip" id="chip-ceiling" title="Highest permission level allowed">ceiling</li>
+      <li class="chip" id="chip-models" title="Configured models">models</li>
+      <li class="chip" id="chip-git" title="Git repository">git</li>
+    </ul>
+    <a class="attention-link" id="attention-link" href="#approvals-panel" hidden>Waiting for you</a>
+    <div class="conn" data-state="connecting" id="conn" role="status" aria-live="polite">
+      <span class="conn-dot" aria-hidden="true"></span>
+      <span id="conn-text">Connecting…</span>
+    </div>
+  </header>
+
+  <div class="layout">
+    <aside class="sidebar" aria-label="Tasks">
+      <section class="card" aria-labelledby="new-task-title">
+        <h2 id="new-task-title">New task</h2>
+        <form id="new-task-form" novalidate>
+          <label for="task-desc">What should the agent do?</label>
+          <textarea id="task-desc" name="description" rows="5" maxlength="50000" required
+                    placeholder="e.g. Fix the failing date parsing test and add a regression test"></textarea>
+          <div class="form-row">
+            <div class="field">
+              <label for="task-mode">Mode</label>
+              <select id="task-mode" name="mode" aria-describedby="mode-hint"></select>
+            </div>
+            <label class="checkbox"><input type="checkbox" id="task-start" checked> Start immediately</label>
+          </div>
+          <p class="hint" id="mode-hint"></p>
+          <div class="form-actions">
+            <button type="submit" class="btn btn-primary" id="task-submit">Start task</button>
+            <span class="kbd-hint" aria-hidden="true">Ctrl+Enter</span>
+          </div>
+          <p class="form-msg" id="form-msg" role="status" aria-live="polite"></p>
+        </form>
+      </section>
+
+      <section class="card task-list-card" aria-labelledby="tasks-title">
+        <div class="card-head">
+          <h2 id="tasks-title">Tasks</h2>
+          <button type="button" class="btn btn-ghost btn-sm" id="refresh-tasks">Refresh</button>
+        </div>
+        <ul class="task-list" id="task-list" aria-label="Task list"></ul>
+        <p class="empty" id="task-list-empty" hidden>No tasks yet. Describe one above to get started.</p>
+      </section>
+    </aside>
+
+    <main id="main" tabindex="-1">
+      <section id="approvals-panel" class="card attention" aria-labelledby="approvals-title" hidden>
+        <div class="card-head">
+          <h2 id="approvals-title"><span class="attention-icon" aria-hidden="true">!</span> Approvals required</h2>
+        </div>
+        <p class="hint">The agent is paused until you decide. Unanswered requests are denied when they time out.</p>
+        <div id="approvals-list" class="stack"></div>
+      </section>
+
+      <section id="questions-panel" class="card attention" aria-labelledby="questions-title" hidden>
+        <div class="card-head">
+          <h2 id="questions-title"><span class="attention-icon" aria-hidden="true">?</span> Questions from the agent</h2>
+        </div>
+        <p class="hint">Blocking questions only. Skipping lets the agent proceed with its most reasonable assumption.</p>
+        <div id="questions-list" class="stack"></div>
+      </section>
+
+      <section id="empty-state" class="card empty-state" aria-labelledby="empty-title">
+        <h2 id="empty-title">No task selected</h2>
+        <p>Create a task on the left, or pick one from the list to follow its progress, review its evidence and read its report.</p>
+      </section>
+
+      <div id="task-view" hidden>
+        <section class="card task-header" aria-labelledby="task-title">
+          <div class="task-head-top">
+            <div class="task-head-main">
+              <h2 id="task-title" class="task-title"></h2>
+              <p class="task-meta">
+                <code id="task-id"></code>
+                <span aria-hidden="true">·</span> <span id="task-mode-label"></span>
+                <span aria-hidden="true">·</span> created <time id="task-created"></time>
+              </p>
+            </div>
+            <div class="task-actions" role="group" aria-label="Task controls">
+              <button type="button" class="btn btn-primary" id="btn-resume">Resume</button>
+              <button type="button" class="btn" id="btn-stop">Stop</button>
+              <button type="button" class="btn btn-danger" id="btn-cancel">Cancel</button>
+            </div>
+          </div>
+          <dl class="task-stats">
+            <div class="stat"><dt>Status</dt><dd id="task-status"></dd></div>
+            <div class="stat"><dt>Stage</dt><dd id="task-stage"></dd></div>
+            <div class="stat"><dt>Elapsed</dt><dd id="task-elapsed"></dd></div>
+            <div class="stat"><dt>Subtasks</dt><dd id="task-subcount"></dd></div>
+          </dl>
+          <div class="progress" id="task-progress" role="progressbar" aria-label="Task progress"
+               aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
+            <div class="progress-bar" id="task-progress-bar"></div>
+          </div>
+          <ol class="stepper" id="stage-stepper" aria-label="Pipeline stages"></ol>
+          <p class="task-error" id="task-error" hidden></p>
+          <details class="task-desc">
+            <summary>Task description</summary>
+            <pre id="task-desc-text"></pre>
+          </details>
+          <p class="action-msg" id="action-msg" role="status" aria-live="polite"></p>
+        </section>
+
+        <div class="grid-main">
+          <section class="card" aria-labelledby="plan-title">
+            <h2 id="plan-title">Plan &amp; subtasks</h2>
+            <div id="plan-body"></div>
+          </section>
+
+          <section class="card activity-card" aria-labelledby="activity-title">
+            <div class="card-head">
+              <h2 id="activity-title">Live activity</h2>
+              <div class="feed-tools">
+                <span class="pill" id="feed-paused" hidden>Paused while hovering</span>
+                <label class="checkbox checkbox-sm"><input type="checkbox" id="feed-verbose"> Model &amp; tool details</label>
+              </div>
+            </div>
+            <ol class="feed" id="feed" tabindex="0" aria-label="Activity events for the selected task"></ol>
+            <p class="empty" id="feed-empty">No activity recorded yet.</p>
+          </section>
+        </div>
+
+        <div class="grid-cards">
+          <section class="card" aria-labelledby="gates-title">
+            <h2 id="gates-title">Quality gates</h2>
+            <div id="gates-body"></div>
+          </section>
+          <section class="card" aria-labelledby="files-title">
+            <h2 id="files-title">Files changed</h2>
+            <div id="files-body"></div>
+          </section>
+          <section class="card span-2" aria-labelledby="tests-title">
+            <h2 id="tests-title">Tests &amp; checks</h2>
+            <div id="tests-body"></div>
+          </section>
+          <section class="card span-2" aria-labelledby="failures-title">
+            <h2 id="failures-title">Failures &amp; repairs</h2>
+            <div id="failures-body"></div>
+          </section>
+          <section class="card" aria-labelledby="checkpoints-title">
+            <h2 id="checkpoints-title">Checkpoints</h2>
+            <div id="checkpoints-body"></div>
+          </section>
+          <section class="card" aria-labelledby="metrics-title">
+            <h2 id="metrics-title">Metrics</h2>
+            <div id="metrics-body"></div>
+          </section>
+        </div>
+
+        <section class="card" aria-labelledby="report-title">
+          <div class="card-head">
+            <h2 id="report-title">Engineering report</h2>
+            <button type="button" class="btn btn-ghost btn-sm" id="refresh-report">Reload</button>
+          </div>
+          <p class="muted small" id="report-path"></p>
+          <article id="report-body" class="markdown"></article>
+        </section>
+      </div>
+    </main>
+  </div>
+
+  <dialog id="diff-dialog" class="modal" aria-labelledby="diff-title">
+    <div class="modal-head">
+      <h2 id="diff-title">Changes since checkpoint</h2>
+      <div class="segmented" role="group" aria-label="Diff format">
+        <button type="button" class="btn btn-sm" id="diff-stat" aria-pressed="true">Summary</button>
+        <button type="button" class="btn btn-sm" id="diff-full" aria-pressed="false">Full diff</button>
+      </div>
+      <button type="button" class="btn btn-ghost btn-sm" id="diff-close" aria-label="Close diff viewer">Close</button>
+    </div>
+    <p class="muted small" id="diff-meta"></p>
+    <pre class="diff" id="diff-content" tabindex="0"></pre>
+  </dialog>
+
+  <dialog id="auth-dialog" class="modal modal-sm" aria-labelledby="auth-title">
+    <form id="auth-form">
+      <h2 id="auth-title">Access token required</h2>
+      <p>Open the URL printed in the terminal where <code>aie ui</code> is running, or paste its token below.</p>
+      <label for="auth-token">Access token</label>
+      <input id="auth-token" type="password" autocomplete="off" spellcheck="false" required>
+      <div class="form-actions">
+        <button type="submit" class="btn btn-primary">Continue</button>
+      </div>
+    </form>
+  </dialog>
+
+  <noscript><p class="noscript">This dashboard needs JavaScript enabled.</p></noscript>
+</body>
+</html>

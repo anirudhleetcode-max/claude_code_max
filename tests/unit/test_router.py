@@ -147,6 +147,22 @@ async def test_cancellation_during_backoff() -> None:
         await asyncio.wait_for(task, 2)
 
 
+
+async def test_cancellation_interrupts_in_flight_request() -> None:
+    # Regression: the cancel token was only checked between attempts, so a stop waited for the
+    # whole model call (up to its timeout) to finish.
+    a = ScriptedProvider("a", steps=[{"delay_s": 30, "text": "late"}])
+    router = make_router(a)
+    token = CancellationToken()
+    task = asyncio.create_task(router.for_role("default").generate(req(), cancel=token))
+    await asyncio.sleep(0.05)
+    started = asyncio.get_running_loop().time()
+    token.cancel("stop")
+    with pytest.raises(CancelledByUser):
+        await asyncio.wait_for(task, 2)
+    assert asyncio.get_running_loop().time() - started < 1.0
+    assert router.for_role("default").breaker.allow("a:x")  # a cancel is not a model failure
+
 class Verdict(BaseModel):
     ok: bool
     reason: str

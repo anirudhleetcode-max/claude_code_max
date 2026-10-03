@@ -8,6 +8,7 @@ from typing import Any
 from pydantic import Field
 
 from ...core.errors import ToolError
+from ...security.secrets import redact_secret_line
 from ..base import Tool, ToolContext, ToolInput, ToolResult
 
 
@@ -63,7 +64,8 @@ class SearchTextTool(Tool):
             raise ToolError(str(exc)) from exc
         if not matches:
             return ToolResult(content=f"no matches for {args.pattern!r}", data={"matches": 0})
-        lines = [f"{m.path}:{m.line}: {m.text}" for m in matches]
+        # matches inside secret files (.env, keys, credentials) get the same redaction as read_file
+        lines = [f"{m.path}:{m.line}: {redact_secret_line(m.text) if ctx.guard.is_secret_file(m.path) else m.text}" for m in matches]
         if len(matches) >= args.max_results:
             lines.append(f"[limited to {args.max_results} matches; narrow the pattern or glob]")
         return ToolResult(content="\n".join(lines), data={"matches": len(matches)})

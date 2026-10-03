@@ -74,6 +74,9 @@ def html_to_text(html: str) -> tuple[str, str]:
     return parser.title, parser.text()
 
 
+METADATA_HOSTS = frozenset({"169.254.169.254", "fd00:ec2::254", "metadata.google.internal", "metadata"})
+
+
 def _host_is_private(host: str) -> bool:
     try:
         infos = socket.getaddrinfo(host, None)
@@ -102,11 +105,14 @@ def check_url(url: str, allow: list[str], block: list[str], allow_private: bool 
         raise ToolError(f"domain {host} is blocked by configuration")
     if allow and not any(host == d or host.endswith("." + d) for d in allow):
         raise ToolError(f"domain {host} is not in the configured allow list")
-    if host in ("169.254.169.254", "metadata.google.internal", "metadata"):
+    if host in METADATA_HOSTS:
         raise ToolError("cloud metadata endpoints are never fetched")
     if not allow_private and (host in ("localhost",) or _host_is_private(host)):
         raise ToolError(f"{host} resolves to a private or local address; use run_command for local services")
     return host
+
+
+MAX_REDIRECTS = 5
 
 
 class WebFetchInput(ToolInput):
@@ -133,20 +139,33 @@ class WebFetchTool(Tool):
         web = ctx.settings.web
         check_url(args.url, web.allow_domains, web.block_domains)
         try:
-            async with httpx.AsyncClient(timeout=web.timeout_s, follow_redirects=True, max_redirects=5) as client:
-                async with client.stream("GET", args.url, headers={"User-Agent": "ai-engineer/0.1 (+research)"}) as resp:
-                    check_url(str(resp.url), web.allow_domains, web.block_domains)
-                    chunks: list[bytes] = []
-                    size = 0
-                    async for chunk in resp.aiter_bytes():
-                        chunks.append(chunk)
-                        size += len(chunk)
-                        if size > web.fetch_max_bytes:
-                            break
-                    body = b"".join(chunks)[: web.fetch_max_bytes]
-                    status = resp.status_code
-                    ctype = resp.headers.get("content-type", "")
-                    final_url = str(resp.url)
+            # Redirects are followed by hand so every hop is checked *before* it is requested: a public
+            # page must not be able to bounce the request to localhost, the LAN or a metadata endpoint.
+            async with httpx.AsyncClient(timeout=web.timeout_s, follow_redirects=False) as client:
+                request = client.build_request("GET", args.url, headers={"User-Agent": "ai-engineer/0.1 (+research)"})
+                for hop in range(MAX_REDIRECTS + 1):
+                    resp = await client.send(request, stream=True)
+                    try:
+                        if resp.next_request is not None:
+                            if hop == MAX_REDIRECTS:
+                                raise ToolError(f"too many redirects (more than {MAX_REDIRECTS})")
+                            check_url(str(resp.next_request.url), web.allow_domains, web.block_domains)
+                            request = resp.next_request
+                            continue
+                        chunks: list[bytes] = []
+                        size = 0
+                        async for chunk in resp.aiter_bytes():
+                            chunks.append(chunk)
+                            size += len(chunk)
+                            if size > web.fetch_max_bytes:
+                                break
+                        body = b"".join(chunks)[: web.fetch_max_bytes]
+                        status = resp.status_code
+                        ctype = resp.headers.get("content-type", "")
+                        final_url = str(resp.url)
+                        break
+                    finally:
+                        await resp.aclose()
         except httpx.HTTPError as exc:
             raise ToolError(f"fetch failed: {exc}") from exc
         text = body.decode("utf-8", errors="replace")

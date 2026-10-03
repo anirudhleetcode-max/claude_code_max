@@ -80,7 +80,7 @@ mode = "developer"
 max_level = "PRIVILEGED"             # set "DEVELOPMENT" to deny high-risk actions outright
 allow_commands = ["npm run e2e*"]    # fnmatch patterns auto-approved (never CRITICAL)
 deny_commands = ["*prod*"]           # always denied
-protected_paths = [".git/**", ".agent/**", ".env", ...]
+protected_paths = ["**/.git/**", ".git", ".agent/**", ".env", ...]   # matched case-insensitively
 ```
 
 ## Quality gates
@@ -113,7 +113,7 @@ mode = "developer"
 max_level = "PRIVILEGED"
 allow_commands = []
 deny_commands = []
-protected_paths = [".git/**", ".agent/**", ".env", ".env.*", "**/*.pem", "**/*.key", "**/id_rsa*", "**/id_ed25519*", "**/.ssh/**"]
+protected_paths = ["**/.git/**", ".git", ".agent/**", ".env", ".env.*", "**/*.pem", "**/*.key", "**/id_rsa*", "**/id_ed25519*", "**/.ssh/**"]
 secret_files = [".env", ".env.*", "**/*.pem", "**/*.key", "**/id_rsa*", "**/credentials*"]
 approval_timeout_s = 900.0
 
