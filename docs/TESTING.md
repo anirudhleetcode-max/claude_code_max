@@ -53,7 +53,7 @@ python scripts/gen_docs.py --check
 | Suite | Location | What it covers |
 |---|---|---|
 | Unit | `tests/unit/` | config, events, router (retry/backoff/breaker/fallback/refusal/cancellation), structured output repair, prompted tool calling, provider wire formats (mocked HTTP, incl. streaming and errors), command risk classifier (100+ cases), secrets and redaction, path guard, static rules, tool executor and every built-in tool, git snapshots, state store, checkpoints, gates, reviewer, planner, debugger, agent loop, memory, job graph, repository intelligence, validation engine and parsers, web dashboard, generated docs |
-| Integration | `tests/integration/` | full pipeline runs on real git repositories with real pytest runs: bug fix with repair, unfixable bug, question answering, provider fallback, all models down then resume, interrupted subtask re-verification, benchmark negative controls |
+| Integration | `tests/integration/` | full pipeline runs on real git repositories with real pytest runs: bug fix with repair, unfixable bug, question answering, provider fallback, all models down then resume, interrupted subtask re-verification, benchmark negative controls, audit regressions (one test per bug found by the final audits, each shown to fail on the pre-fix code) |
 | Adversarial | `tests/adversarial/` | compromised model (destructive commands, exfiltration, protected writes), malformed model output, hanging tests, concurrent human edits, network loss, crashed process recovery, huge repositories, failing commands |
 
 Models are simulated with `ScriptedProvider` (role-aware transcripts). These

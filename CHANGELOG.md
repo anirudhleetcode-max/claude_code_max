@@ -82,7 +82,7 @@ All notable changes to this project are documented here. The format follows
 - Task events are returned in emission order (events emitted within the same
   millisecond could appear out of order).
 
-### Correctness fixes (found by the final audit)
+### Correctness fixes (found by the final audit, each with a regression test)
 - A hang or crash the agent introduced was excused as a "pre-existing" failure
   when the baseline had an unrelated failing test. The broken code was then
   committed without repair. A change of status (failed → timeout or crash) is now
