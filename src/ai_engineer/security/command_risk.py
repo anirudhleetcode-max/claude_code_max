@@ -83,7 +83,10 @@ SYSTEM_PACKAGE_MANAGERS = {"apt", "apt-get", "aptitude", "dpkg", "yum", "dnf", "
 
 PRIVILEGE = {"sudo", "doas", "su", "runas", "pkexec"}
 
-CRITICAL_PROGRAMS = {"mkfs", "fdisk", "sfdisk", "cfdisk", "parted", "wipefs", "diskpart", "format", "mkswap", "fsck"}
+CRITICAL_PROGRAMS = {
+    "mkfs", "fdisk", "sfdisk", "cfdisk", "parted", "wipefs", "diskpart", "format", "mkswap", "fsck",
+    "format-volume", "clear-disk", "initialize-disk", "remove-partition",
+}
 
 HIGH_PROGRAMS = {
     "shutdown", "reboot", "halt", "poweroff", "mount", "umount", "useradd", "userdel", "usermod", "groupadd",
@@ -92,13 +95,24 @@ HIGH_PROGRAMS = {
     "rsync", "ssh", "launchctl", "crontab", "at", "insmod", "rmmod", "modprobe", "sysctl", "setenforce",
     "security", "keychain", "certutil", "update-alternatives", "chattr", "eval", "set-executionpolicy",
     "reg", "bcdedit", "takeown", "icacls", "cipher", "vssadmin", "wmic",
+    "dropdb", "dropuser", "swapoff", "swapon", "scutil", "nvram", "csrutil", "spctl", "pmset", "networksetup",
+    "setx", "stop-computer", "restart-computer", "set-itemproperty", "remove-itemproperty",
 }
 
 NETWORK_PROGRAMS = {"curl", "wget", "http", "https", "aria2c", "invoke-webrequest", "iwr", "invoke-restmethod", "irm"}
 
 INTERPRETERS = {"python", "python3", "python2", "py", "node", "deno", "bun", "ruby", "perl", "php", "lua", "julia", "rscript"}
 SHELLS = {"sh", "bash", "zsh", "fish", "dash", "ksh", "csh", "tcsh", "pwsh", "powershell", "cmd"}
-WRAPPERS = {"time", "nice", "nohup", "command", "exec", "builtin", "stdbuf", "timeout", "env", "xargs", "ionice", "unbuffer"}
+WRAPPERS = {"time", "nice", "nohup", "command", "exec", "builtin", "stdbuf", "timeout", "env", "xargs", "ionice", "unbuffer", "busybox", "toybox"}
+
+# Credential / secret files: deleting or overwriting them from the shell needs approval.
+_SENSITIVE_NAME = re.compile(
+    r"(?i)(^|[/\\])(\.env(\.(?!example$|sample$|template$|dist$)[^/\\]+)?|[^/\\]*\.(pem|key|p12|pfx|keystore|jks)|id_(rsa|dsa|ecdsa|ed25519)[^/\\]*|credentials[^/\\]*|\.netrc|\.pgpass|\.npmrc|\.pypirc)$"
+)
+
+
+def _sensitive(path: str) -> bool:
+    return bool(_SENSITIVE_NAME.search(path.strip().strip("\"'")))
 
 SAFE_SCRIPT_NAMES = {"test", "tests", "lint", "build", "typecheck", "type-check", "check", "format", "fmt", "compile", "coverage", "ci"}
 
@@ -289,7 +303,13 @@ _WRAPPER_VALUE_OPTS: dict[str, set[str]] = {
 
 
 def _classify_git(args: list[str], a: CommandAssessment) -> None:
-    sub = next((x for x in args if not x.startswith("-")), "")
+    head = args[: next((i for i, x in enumerate(args) if not x.startswith("-")), len(args))]
+    if any(x in ("-c", "--config-env") or x.startswith(("--exec-path", "--config-env=")) for x in head):
+        # -c core.pager=..., diff.external=..., --exec-path=...: even read-only commands can run code
+        a.bump(Risk.MEDIUM, "git configuration override can run arbitrary programs")
+    if any(x == "--output" or x.startswith("--output=") for x in args):
+        a.bump(Risk.MEDIUM, "git writes its output to a file")
+    sub = next((x for x in args if not x.startswith("-") and x not in _git_option_values(args)), "")
     rest = args[args.index(sub) + 1 :] if sub in args else []
     flags = set(rest)
     read_only = {
@@ -319,8 +339,22 @@ def _classify_git(args: list[str], a: CommandAssessment) -> None:
     if sub == "clean" and any(f.startswith("-") and "f" in f for f in rest):
         a.bump(Risk.HIGH, "git clean deletes untracked files")
         return
-    if sub in ("checkout", "restore") and ("." in rest or "--" in rest or flags & {"-f", "--force", "--worktree"}) and "--staged" not in flags:
+    if sub in ("checkout", "restore") and (
+        (("." in rest or "--" in rest or flags & {"-f", "--force"}) and "--staged" not in flags) or flags & {"--worktree", "-W"}
+    ):
         a.bump(Risk.HIGH, f"git {sub} can discard working-tree changes")
+        return
+    if sub == "tag" and flags & {"-d", "--delete", "-f", "--force"}:
+        a.bump(Risk.HIGH, "deletes or moves a tag")
+        return
+    if sub in ("submodule", "worktree") and (flags & {"-f", "--force"} or rest[:1] in (["deinit"], ["remove"])):
+        a.bump(Risk.HIGH, f"git {sub} can discard checked-out work")
+        return
+    if sub == "rm" and "--cached" not in flags:
+        a.bump(Risk.HIGH if flags & {"-r", "-rf", "-fr"} else Risk.MEDIUM, "git rm deletes files")
+        return
+    if sub == "rebase" and "--abort" not in flags:
+        a.bump(Risk.HIGH, "git rebase rewrites commit history")
         return
     if sub == "branch" and flags & {"-D", "--delete", "-d", "-M", "-f", "--force"}:
         a.bump(Risk.HIGH, "deletes or force-moves a branch")
@@ -334,10 +368,55 @@ def _classify_git(args: list[str], a: CommandAssessment) -> None:
     if sub in ("credential", "credential-store", "credential-cache") or (sub == "config" and any("credential" in r for r in rest)):
         a.bump(Risk.HIGH, "touches git credentials")
         return
-    if sub in ("rebase", "merge", "cherry-pick", "revert", "am", "pull") and "--abort" not in flags:
+    if sub in ("merge", "cherry-pick", "revert", "am", "pull") and "--abort" not in flags:
         a.bump(Risk.MEDIUM, f"git {sub} modifies history/working tree")
         return
     a.bump(Risk.MEDIUM, f"git {sub or 'command'} modifies repository state")
+
+
+def _git_option_values(args: list[str]) -> set[str]:
+    """Values of git's global options (``-c name=value``, ``-C dir``) so they are not taken for the subcommand."""
+    values = set()
+    for i, x in enumerate(args[:-1]):
+        if x in ("-c", "-C", "--git-dir", "--work-tree", "--namespace", "--config-env"):
+            values.add(args[i + 1])
+        elif not x.startswith("-"):
+            break
+    return values
+
+
+# Variables that make an otherwise harmless program load libraries, run hooks or pick another binary.
+_CODE_LOADING_VARS = re.compile(
+    r"^(LD_PRELOAD|LD_LIBRARY_PATH|LD_AUDIT|DYLD_[A-Z_]+|PYTHONSTARTUP|PYTHONPATH|PYTHONHOME|NODE_OPTIONS|NODE_PATH|PERL5OPT|PERL5LIB|"
+    r"RUBYOPT|RUBYLIB|BASH_ENV|ENV|PROMPT_COMMAND|PS4|IFS|PAGER|GIT_PAGER|MANPAGER|EDITOR|VISUAL|GIT_EDITOR|GIT_EXTERNAL_DIFF|GIT_SSH|"
+    r"GIT_SSH_COMMAND|GIT_ASKPASS|SSH_ASKPASS|GIT_EXEC_PATH|GIT_CONFIG_[A-Z0-9_]+|GIT_CONFIG|GIT_DIR|GIT_WORK_TREE|PATH)="
+)
+
+
+def _check_assignment(assignment: str, a: CommandAssessment) -> None:
+    if _CODE_LOADING_VARS.match(assignment):
+        a.bump(Risk.MEDIUM, f"sets {assignment.split('=', 1)[0]}, which can make the command run other code")
+
+
+def _read_only_escape(prog: str, args: list[str], segment: str) -> str:
+    """Why a normally read-only program would write files or run commands here ("" if it would not)."""
+    if prog == "sed":
+        scripts = [x for x in args if not x.startswith("-")][:1] + [args[i + 1] for i, x in enumerate(args[:-1]) if x in ("-e", "--expression")]
+        for script in scripts:
+            if re.search(r"(^|[;{}\n]|\d|\$|/)\s*[ewWrR]\b|/[gpIiMm0-9]*e[gpIiMm0-9]*\s*($|[;}])", script):
+                return "sed script writes files or runs commands"
+        return ""
+    if prog in ("sort",) and any(x in ("-o",) or x.startswith(("--output", "-o")) for x in args):
+        return "sort writes its output to a file"
+    if prog == "uniq" and len([x for x in args if not x.startswith("-")]) >= 2:
+        return "uniq writes its output to a file"
+    if prog in ("awk", "gawk") and re.search(r"system\s*\(|\|\s*\"|\bgetline\b|print[^;}]*>", segment):
+        return "awk script writes files or runs commands"
+    if prog == "find" and any(x in ("-fprint", "-fprint0", "-fprintf", "-fls", "-exec", "-execdir", "-ok", "-okdir", "-delete") for x in args):
+        return "find writes files or runs commands"
+    if prog in ("less", "more", "man") and any(x.startswith("+!") or x.startswith("-o") for x in args):
+        return f"{prog} writes files or runs commands"
+    return ""
 
 
 def _classify_package_manager(prog: str, args: list[str], a: CommandAssessment) -> bool:
@@ -416,13 +495,26 @@ def _classify_segment(tokens: list[str], segment: str, ctx: _Context, a: Command
         if re.match(r"/dev/(sd|hd|nvme|disk|mmcblk|xvd|vd)", target):
             a.bump(Risk.CRITICAL, f"writes directly to block device {target}")
         elif target not in ("/dev/null", "nul", "NUL", "/dev/stdout", "/dev/stderr"):
-            if ctx.outside_workspace(target):
+            if _sensitive(target):
+                a.bump(Risk.HIGH, f"overwrites a credential/secret file ({target})")
+            elif ctx.outside_workspace(target):
                 a.bump(Risk.HIGH, f"redirects output outside the workspace ({target})")
             else:
                 a.bump(Risk.MEDIUM, f"writes file {target}")
     tokens = _strip_redirects(tokens)
-    # strip leading VAR=value assignments and wrappers
+    # subshells, groups and negation: "(rm -rf ~)", "{ rm -rf ~; }", "! cmd" run the inner command
+    while tokens and tokens[0] in ("(", "{", "!"):
+        tokens = tokens[1:]
+    while tokens and tokens[-1] in (")", "}"):
+        tokens = tokens[:-1]
+    if tokens and tokens[0].startswith("(") and len(tokens[0]) > 1:
+        tokens = [tokens[0].lstrip("("), *tokens[1:]]
+    if tokens and tokens[-1].endswith(")") and tokens[-1].count(")") > tokens[-1].count("("):
+        tokens = [*tokens[:-1], tokens[-1].rstrip(")")]
+    tokens = [t for t in tokens if t]
+    # strip leading VAR=value assignments and wrappers; some variables make a program load or run other code
     while tokens and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=.*", tokens[0]):
+        _check_assignment(tokens[0], a)
         tokens = tokens[1:]
     if not tokens:
         return
@@ -445,8 +537,11 @@ def _classify_segment(tokens: list[str], segment: str, ctx: _Context, a: Command
         rest = _skip_options(args, _WRAPPER_VALUE_OPTS.get(prog, set()))
         if prog == "timeout":
             rest = rest[1:]  # the duration
+        elif prog in ("busybox", "toybox") and not rest:
+            return
         elif prog == "env":
             while rest and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=.*", rest[0]):
+                _check_assignment(rest[0], a)
                 rest = rest[1:]
             if not rest:
                 a.bump(Risk.MEDIUM, "prints the environment (may expose secrets)", read_only=True)
@@ -477,8 +572,18 @@ def _classify_segment(tokens: list[str], segment: str, ctx: _Context, a: Command
     if prog in ("kill", "pkill", "killall", "taskkill", "stop-process"):
         if "-1" in args and ("-9" in args or "-KILL" in args or "-s" in args):
             a.bump(Risk.CRITICAL, "kills every process")
+        elif "1" in args or "-u" in args or "--user" in args or (prog in ("killall", "pkill") and "-9" in args and not [x for x in args if not x.startswith("-")][1:]):
+            a.bump(Risk.HIGH, f"{prog} targets system or other users' processes")
         else:
             a.bump(Risk.MEDIUM, f"{prog} terminates processes")
+        return
+    if prog == "defaults" and args[:1] in (["write"], ["delete"], ["import"], ["rename"]):
+        a.bump(Risk.HIGH, "changes macOS user or system preferences")
+        return
+    if prog == "diskutil":
+        if args[:1] in (["list"], ["info"], ["activity"]):
+            return
+        a.bump(Risk.CRITICAL if args and args[0].lower().startswith(("erase", "zero", "partition", "reformat", "secureerase")) else Risk.HIGH, "diskutil changes disks or volumes")
         return
     if prog in ("systemctl", "service", "sc"):
         if args[:1] in (["status"], ["list-units"], ["is-active"], ["query"]):
@@ -501,6 +606,8 @@ def _classify_segment(tokens: list[str], segment: str, ctx: _Context, a: Command
             a.bump(Risk.CRITICAL, "recursive deletion of a system, home or root directory")
         elif recursive:
             a.bump(Risk.HIGH, "recursive deletion")
+        elif any(_sensitive(t) for t in targets):
+            a.bump(Risk.HIGH, "deletes a credential/secret file")
         elif any(ctx.outside_workspace(t) for t in targets):
             a.bump(Risk.HIGH, "deletes files outside the workspace")
         else:
@@ -522,6 +629,8 @@ def _classify_segment(tokens: list[str], segment: str, ctx: _Context, a: Command
         targets = [x for x in args if not x.startswith("-")]
         if prog == "robocopy" and any(x.lower() == "/mir" for x in args):
             a.bump(Risk.HIGH, "robocopy /MIR deletes files")
+        elif any(_sensitive(t) for t in (targets if prog in ("mv", "move", "move-item", "truncate", "tee") else targets[-1:])):
+            a.bump(Risk.HIGH, f"{prog} moves, overwrites or truncates a credential/secret file")
         elif any(ctx.outside_workspace(t) for t in targets[-1:] if prog not in ("tee",)) or (prog == "tee" and any(ctx.outside_workspace(t) for t in targets)):
             a.bump(Risk.HIGH, f"{prog} writes outside the workspace")
         elif prog in ("mv", "move", "move-item") and any(t in ("/dev/null", "nul") for t in targets):
@@ -634,6 +743,20 @@ def _classify_segment(tokens: list[str], segment: str, ctx: _Context, a: Command
         a.bump(Risk.MEDIUM, f"{prog} edits files in place")
         return
     if prog == "find":
+        roots = [x for x in args[: next((i for i, x in enumerate(args) if x.startswith("-")), len(args))]]
+        deleting = "-delete" in args
+        if any(x in ("-exec", "-execdir", "-ok", "-okdir") for x in args):
+            idx = next(i for i, x in enumerate(args) if x in ("-exec", "-execdir", "-ok", "-okdir"))
+            deleting = deleting or _norm_program(args[idx + 1]) in ("rm", "del", "shred", "unlink", "rmdir") if idx + 1 < len(args) else deleting
+        if deleting and any(ctx.catastrophic_target(r) for r in roots):
+            a.bump(Risk.CRITICAL, "find deletes files across a system, home or root directory")
+            return
+        if deleting:
+            a.bump(Risk.HIGH, "find deletes the files it matches")
+        writes = [args[i + 1] for i, x in enumerate(args[:-1]) if x in ("-fprint", "-fprint0", "-fprintf", "-fls")]
+        if writes:
+            outside = any(ctx.outside_workspace(w) for w in writes)
+            a.bump(Risk.HIGH if outside else Risk.MEDIUM, "find writes its output to a file" + (" outside the workspace" if outside else ""))
         if any(x in ("-delete",) for x in args):
             a.bump(Risk.HIGH, "find -delete removes files")
         elif any(x in ("-exec", "-execdir", "-ok", "-okdir") for x in args):
@@ -657,6 +780,9 @@ def _classify_segment(tokens: list[str], segment: str, ctx: _Context, a: Command
         a.bump(Risk.MEDIUM, "reads an environment file (output will be redacted)", read_only=True)
         return
     if prog in READ_ONLY_PROGRAMS:
+        escape = _read_only_escape(prog, args, segment)
+        if escape:
+            a.bump(Risk.MEDIUM, escape)
         return
     if prog.startswith("./") or prog.startswith("../") or "/" in tokens[0]:
         a.bump(Risk.MEDIUM, f"runs local program {tokens[0]}")
