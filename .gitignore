@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+build/
+dist/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Secrets
+.env
+.env.*
+!.env.example
+
+# Agent state for this repository itself
+.agent/
+benchmark-results/
+
+# Editors / OS
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db

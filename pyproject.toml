@@ -1,0 +1,93 @@
+[build-system]
+requires = ["hatchling>=1.24"]
+build-backend = "hatchling.build"
+
+[project]
+name = "ai-engineer"
+version = "0.1.0"
+description = "Self-hosted, model-agnostic autonomous software engineering agent"
+readme = "README.md"
+requires-python = ">=3.11"
+authors = [{ name = "AI Engineer contributors" }]
+keywords = ["agent", "llm", "software-engineering", "automation"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Operating System :: OS Independent",
+    "Topic :: Software Development",
+]
+dependencies = [
+    "pydantic>=2.6,<3",
+    "httpx>=0.27,<1",
+]
+
+[project.optional-dependencies]
+anthropic = ["anthropic>=1.0,<2"]
+web = ["starlette>=0.37", "uvicorn>=0.29"]
+browser = ["playwright>=1.40"]
+all = [
+    "anthropic>=1.0,<2",
+    "starlette>=0.37",
+    "uvicorn>=0.29",
+    "playwright>=1.40",
+]
+dev = [
+    "pytest>=8",
+    "pytest-asyncio>=0.23",
+    "ruff>=0.5",
+    "mypy>=1.10",
+]
+
+[project.scripts]
+aie = "ai_engineer.ui.cli:main"
+ai-engineer = "ai_engineer.ui.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/ai_engineer"]
+
+[tool.hatch.build.targets.sdist]
+include = ["src/ai_engineer", "tests", "benchmarks", "docs", "*.md", ".env.example"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+testpaths = ["tests"]
+pythonpath = ["."]
+markers = [
+    "slow: long-running tests",
+    "network: requires network access",
+    "browser: requires a Playwright browser",
+]
+filterwarnings = ["error::pytest.PytestUnraisableExceptionWarning"]
+
+[tool.ruff]
+line-length = 110
+target-version = "py311"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "S", "ASYNC", "RUF"]
+ignore = [
+    "S101",   # assert is fine in tests and internal invariants
+    "S603",   # subprocess calls are intentional and policy-checked
+    "S607",   # partial executable paths are resolved deliberately
+    "S404",
+    "RUF012",
+    "E501",
+    "B008",
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S", "B", "ASYNC"]
+"benchmarks/**" = ["S"]
+
+[tool.mypy]
+python_version = "3.11"
+packages = ["ai_engineer"]
+mypy_path = "src"
+ignore_missing_imports = true
+warn_unused_ignores = true
+warn_redundant_casts = true
+no_implicit_optional = true
+check_untyped_defs = true
