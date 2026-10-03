@@ -75,7 +75,8 @@ async def test_empty_and_basic_results_in_input_order() -> None:
     assert list(results) == ["b", "a", "c"]
     assert {k: r.status for k, r in results.items()} == {"b": "ok", "a": "ok", "c": "ok"}
     assert results["b"].value == 2 and results["a"].value == 1 and results["c"].value is None
-    assert results["b"].ok and results["b"].duration_s >= 0.015
+    # Windows' monotonic clock ticks every ~15.6 ms, so only assert that a duration was measured
+    assert results["b"].ok and results["b"].duration_s > 0.005
 
 
 def test_validation_errors() -> None:

@@ -6,6 +6,7 @@ from types import SimpleNamespace
 import pytest
 
 from ai_engineer.config.settings import ValidationSettings
+from ai_engineer.tester import detect
 from ai_engineer.tester.detect import (
     executable_of,
     format_check_command,
@@ -17,6 +18,12 @@ from ai_engineer.tester.detect import (
     write_format_command,
 )
 from ai_engineer.tester.models import CheckKind, ValidationCommand
+
+
+@pytest.fixture(autouse=True)
+def posix_shell(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Expected strings below use POSIX quoting; Windows quoting has its own tests."""
+    monkeypatch.setattr(detect, "_WINDOWS", False)
 
 
 def sugg(command: str, source: str = "manifest", confidence: float = 0.9) -> SimpleNamespace:
@@ -261,6 +268,23 @@ def test_targeted_quotes_paths_and_handles_windows_separators() -> None:
     t = targeted_test_command(vc("pytest"), ["tests/my test.py", "tests\\win_test.py"])
     assert t is not None and t.command == "pytest 'tests/my test.py' tests/win_test.py"
 
+
+
+def test_targeted_commands_use_cmd_quoting_on_windows(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Regression (Windows CI): any backslash in the command disabled targeting, so every "targeted"
+    # run on Windows ran the whole suite; quoting was POSIX-only (cmd.exe ignores single quotes).
+    monkeypatch.setattr(detect, "_WINDOWS", True)
+    base = vc('"C:\\Python 3.11\\python.exe" -m pytest -q -p no:cacheprovider')
+    t = targeted_test_command(base, ["tests/test_ok.py", "tests\\sub dir\\test_x.py"])
+    assert t is not None
+    assert t.command == '"C:\\Python 3.11\\python.exe" -m pytest -q -p no:cacheprovider tests/test_ok.py "tests/sub dir/test_x.py"'
+    assert targeted_test_command(base, ["tests/a&b.py"]) is None  # cmd.exe metacharacters: run the full suite
+    lint = targeted_lint_command(vc("C:\\venv\\Scripts\\ruff.exe check .", CheckKind.LINT), ["src/a.py"])
+    assert lint is not None and lint.command == "C:\\venv\\Scripts\\ruff.exe check src/a.py"
+
+
+def test_backslash_commands_are_not_rebuilt_on_posix() -> None:
+    assert targeted_test_command(vc("pytest -k 'a\\ b'"), ["tests/test_a.py"]) is None
 
 def test_targeted_django() -> None:
     t = targeted_test_command(vc("python manage.py test"), ["app/tests/test_views.py"])

@@ -8,10 +8,12 @@ missing tool is reported instead of failing obscurely.
 
 from __future__ import annotations
 
+import os
 import posixpath
 import re
 import shlex
 import shutil
+import subprocess
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
@@ -97,12 +99,31 @@ def has_operators(command: str) -> bool:
     return any(tok in _OPERATORS for tok in split_command(command))
 
 
+# Commands run through the platform shell: POSIX sh, or cmd.exe on Windows (which does not
+# understand single quotes and treats backslashes in paths literally).
+_WINDOWS = os.name == "nt"
+_CMD_SPECIAL = set('&|<>^%!"')
+
+
+def _posix_escapes(command: str) -> bool:
+    """Backslashes are shell escapes on POSIX; rebuilding such a command could change its meaning."""
+    return "\\" in command and not _WINDOWS
+
+
+def _quotable(paths: Iterable[str]) -> bool:
+    return not _WINDOWS or not any(set(p) & _CMD_SPECIAL for p in paths)
+
+
+def _quote(token: str) -> str:
+    return subprocess.list2cmdline([token]) if _WINDOWS else shlex.quote(token)
+
+
 def _join(tokens: Sequence[str]) -> str:
-    return " ".join(shlex.quote(t) for t in tokens)
+    return " ".join(_quote(t) for t in tokens)
 
 
 def _quote_path(path: str) -> str:
-    return shlex.quote(path.replace("\\", "/"))
+    return _quote(path.replace("\\", "/"))
 
 
 # --- profile access ---------------------------------------------------------------------------
@@ -168,7 +189,7 @@ def format_check_command(command: str, check_scripts: Iterable[str] = (), *, tru
     """
     looks_check = bool(_CHECK_HINT.search(command))
     tokens = program_tokens(command)
-    if not tokens or has_operators(command) or "\\" in command:
+    if not tokens or has_operators(command) or _posix_escapes(command):
         return command if (looks_check or trust_unknown) else None
     full = split_command(command)
     offset = full.index(tokens[0]) if tokens[0] in full else 0
@@ -230,7 +251,7 @@ def format_check_command(command: str, check_scripts: Iterable[str] = (), *, tru
 def format_write_command(command: str) -> str | None:
     """Convert a (check-mode) formatter invocation to the mode that rewrites files."""
     tokens = program_tokens(command)
-    if not tokens or has_operators(command) or "\\" in command:
+    if not tokens or has_operators(command) or _posix_escapes(command):
         return None if _CHECK_HINT.search(command) else command
     full = split_command(command)
     offset = full.index(tokens[0]) if tokens[0] in full else 0
@@ -405,7 +426,7 @@ def targeted_test_command(
 ) -> ValidationCommand | None:
     """A command that runs only ``test_files`` with the same runner, or None if not derivable."""
     files = [f for f in test_files if f.strip()]
-    if not files or has_operators(base.command) or "\\" in base.command:
+    if not files or has_operators(base.command) or _posix_escapes(base.command) or not _quotable(files):
         return None
     full = split_command(base.command)
     tokens = program_tokens(base.command)
@@ -484,7 +505,7 @@ _TARGETABLE: dict[str, tuple[tuple[str, ...], set[str]]] = {
 
 
 def _retarget(command: str, files: list[str]) -> str | None:
-    if not files or has_operators(command) or "\\" in command:
+    if not files or has_operators(command) or _posix_escapes(command) or not _quotable(files):
         return None
     full = split_command(command)
     tokens = program_tokens(command)

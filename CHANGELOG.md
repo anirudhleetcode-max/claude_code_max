@@ -49,6 +49,9 @@ All notable changes to this project are documented here. The format follows
 - Test-failure paths kept Windows separators; the repository index kept stale data
   when its database file could not be deleted (Windows file locking).
 - A `.agent/.gitignore` that un-ignored its config made fresh repositories dirty.
+- On Windows, targeted test and lint runs always fell back to the full command,
+  because any backslash in the command disabled targeting. Commands are now
+  rebuilt with `cmd.exe` quoting on Windows.
 
 ### Security and robustness fixes (found by the final audit)
 - `db_query` could create or overwrite SQLite files outside the workspace with
