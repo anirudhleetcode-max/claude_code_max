@@ -19,6 +19,7 @@ import shutil
 from collections.abc import Callable
 from pathlib import Path
 
+from ..core.errors import StateError
 from ..core.events import EventBus, EventType
 from ..core.ids import new_id
 from ..core.util import atomic_write_json
@@ -165,6 +166,20 @@ class CheckpointManager:
         """Restore the workspace to ``cp_id``. Returns (safety checkpoint, restored/removed paths)."""
         record = self._require(cp_id)
         safety = await self.create(f"before restoring {cp_id}", task_id=record.task_id, subtask_id=record.subtask_id)
+        try:
+            touched = await self._restore_into(record, safety)
+        except Exception as exc:
+            # a restore that dies half-way (disk full, killed git, locked file) leaves a mixed tree:
+            # the safety checkpoint taken above is the way back, so name it
+            if self.bus is not None:
+                self.bus.emit(EventType.WARNING, f"restore of {cp_id} failed: {exc}; undo with the safety checkpoint {safety.id}", data={"safety_checkpoint": safety.id})
+            raise StateError(f"restore of {cp_id} failed part-way ({exc}); return to the state before the restore with: aie restore {safety.id}") from exc
+        self.files.forget_reads()
+        if self.bus is not None:
+            self.bus.emit(EventType.CHECKPOINT_RESTORED, f"restored checkpoint {cp_id[-8:]} ({len(touched)} file(s)); safety checkpoint {safety.id[-8:]}", data={"checkpoint_id": cp_id, "safety_checkpoint": safety.id, "paths": touched[:100]})
+        return safety, sorted(touched)
+
+    async def _restore_into(self, record: CheckpointRecord, safety: CheckpointRecord) -> list[str]:
         touched: list[str] = []
         if record.kind == "git" and self.git is not None and record.tree:
             removed = await self.git.restore_tree(record.tree)
@@ -189,10 +204,7 @@ class CheckpointManager:
                     target.write_bytes(content)
                     self.files.after_write(target)
                 touched.append(rel)
-        self.files.forget_reads()
-        if self.bus is not None:
-            self.bus.emit(EventType.CHECKPOINT_RESTORED, f"restored checkpoint {cp_id[-8:]} ({len(touched)} file(s)); safety checkpoint {safety.id[-8:]}", data={"checkpoint_id": cp_id, "safety_checkpoint": safety.id, "paths": touched[:100]})
-        return safety, sorted(touched)
+        return touched
 
     def list_checkpoints(self, task_id: str | None = None) -> list[CheckpointRecord]:
         return self.store.list_checkpoints(task_id)

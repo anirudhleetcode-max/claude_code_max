@@ -208,9 +208,10 @@ def evaluate_gates(settings: GatesSettings, inputs: GateInputs) -> GateReport:
         if getattr(r, "verdict", "approve") == "request_changes":
             return GateResult(name="review", mode=mode, status=GateStatus.FAILED, detail=f"the reviewer requested changes: {r.summary[:300]}", evidence=evidence)
         minor = len(r.issues)
-        if r.source == "deterministic-only":
+        if r.source in ("deterministic-only", "deterministic", "model-incomplete"):
             status = GateStatus.UNVERIFIED if mode == GateMode.REQUIRED else GateStatus.SKIPPED
-            return GateResult(name="review", mode=mode, status=status, detail=f"independent model review unavailable; automated checks found no blocking issues ({r.summary})", evidence=evidence)
+            why = "independent model review incomplete" if r.source == "model-incomplete" else "independent model review unavailable"
+            return GateResult(name="review", mode=mode, status=status, detail=f"{why}; automated checks found no blocking issues ({r.summary})", evidence=evidence)
         return GateResult(name="review", mode=mode, status=GateStatus.PASSED, detail=f"approved ({r.source})" + (f"; {minor} non-blocking note(s)" if minor else ""), evidence=evidence)
 
     add("review", review)

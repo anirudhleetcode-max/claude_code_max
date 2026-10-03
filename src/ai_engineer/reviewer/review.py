@@ -7,7 +7,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
-from ..core.errors import AllModelsFailedError, MalformedOutputError
+from ..core.errors import CancelledByUser, ConfigError, ProviderError
 from ..core.types import Message
 from ..core.util import truncate_middle
 from ..models.base import ModelRequest
@@ -206,9 +206,26 @@ async def review_change(
                 model, task=task, criteria=criteria, diff=diff, validation_summary=validation_summary,
                 deterministic=deterministic, project_brief=project_brief, cancel=cancel, focus=focus,
             )
-        except (AllModelsFailedError, MalformedOutputError) as exc:
+        except CancelledByUser:
+            raise
+        except (TimeoutError, ProviderError, ConfigError) as exc:
+            # any failure of the reviewer (down, unreachable, timed out, context too long, malformed
+            # or missing configuration) leaves the change unreviewed: never a pass
             note = f"model review unavailable ({type(exc).__name__}); deterministic checks only"
+    incomplete = model_result is not None and _incomplete(model_result, criteria)
+    if incomplete:
+        note = "model review incomplete: it assessed none of the acceptance criteria" if criteria else "model review was empty"
     result = combine(deterministic, model_result, note)
     if use_model and model_result is None:
         result.source = "deterministic-only"
+    elif incomplete:
+        result.source = "model-incomplete"
     return result, findings
+
+
+def _incomplete(review: ReviewResult, criteria: list[str]) -> bool:
+    """A review that states nothing verifiable (no summary, issues or criteria assessments), or that
+    ignored every acceptance criterion it was given, is not evidence that the change is right."""
+    if criteria and not review.requirements:
+        return True
+    return not review.summary.strip() and not review.issues and not review.requirements
