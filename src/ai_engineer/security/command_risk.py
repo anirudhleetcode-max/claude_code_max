@@ -753,9 +753,9 @@ def _classify_segment(tokens: list[str], segment: str, ctx: _Context, a: Command
             return
         if deleting:
             a.bump(Risk.HIGH, "find deletes the files it matches")
-        writes = [args[i + 1] for i, x in enumerate(args[:-1]) if x in ("-fprint", "-fprint0", "-fprintf", "-fls")]
-        if writes:
-            outside = any(ctx.outside_workspace(w) for w in writes)
+        output_files = [args[i + 1] for i, x in enumerate(args[:-1]) if x in ("-fprint", "-fprint0", "-fprintf", "-fls")]
+        if output_files:
+            outside = any(ctx.outside_workspace(w) for w in output_files)
             a.bump(Risk.HIGH if outside else Risk.MEDIUM, "find writes its output to a file" + (" outside the workspace" if outside else ""))
         if any(x in ("-delete",) for x in args):
             a.bump(Risk.HIGH, "find -delete removes files")
