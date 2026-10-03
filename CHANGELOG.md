@@ -49,6 +49,10 @@ All notable changes to this project are documented here. The format follows
 - Test-failure paths kept Windows separators; the repository index kept stale data
   when its database file could not be deleted (Windows file locking).
 - A `.agent/.gitignore` that un-ignored its config made fresh repositories dirty.
+- On Windows, checking whether a lease owner was alive called `os.kill(pid, 0)`.
+  On Windows, signal 0 is `CTRL_C_EVENT`, so any `aie` command run while a task
+  was active sent Ctrl+C to every process on the console. The check now queries
+  the process with `OpenProcess`/`GetExitCodeProcess` (found by Windows CI).
 - On Windows, targeted test and lint runs always fell back to the full command,
   because any backslash in the command disabled targeting. Commands are now
   rebuilt with `cmd.exe` quoting on Windows.

@@ -10,6 +10,7 @@ import json
 import os
 import socket
 import sqlite3
+import sys
 import threading
 import time
 from collections.abc import Iterable
@@ -135,6 +136,10 @@ def lease_owner_id(session: str = "") -> str:
 def _pid_alive(pid: int) -> bool:
     if pid <= 0:
         return False
+    if sys.platform == "win32":
+        # Never os.kill(pid, 0) on Windows: signal 0 is CTRL_C_EVENT there and would send Ctrl+C
+        # to every process attached to the console (including the running agent and ourselves).
+        return _win_pid_alive(pid)
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
@@ -144,6 +149,28 @@ def _pid_alive(pid: int) -> bool:
     except OSError:
         return False
     return True
+
+
+if sys.platform == "win32":
+
+    def _win_pid_alive(pid: int) -> bool:
+        import ctypes
+        from ctypes import wintypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.OpenProcess.restype = wintypes.HANDLE
+        kernel32.OpenProcess.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
+        process_query_limited_information, error_access_denied, still_active = 0x1000, 5, 259
+        handle = kernel32.OpenProcess(process_query_limited_information, False, pid)
+        if not handle:
+            return ctypes.get_last_error() == error_access_denied  # exists, but not ours to query
+        try:
+            code = wintypes.DWORD()
+            if not kernel32.GetExitCodeProcess(handle, ctypes.byref(code)):
+                return True
+            return code.value == still_active
+        finally:
+            kernel32.CloseHandle(handle)
 
 
 class StateStore:

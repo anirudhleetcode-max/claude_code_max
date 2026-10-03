@@ -147,3 +147,18 @@ def test_newer_schema_is_refused(tmp_path: Path) -> None:
     store.close()
     with pytest.raises(StateError):
         StateStore(tmp_path / "s.db")
+
+
+def test_pid_alive_checks_without_signalling() -> None:
+    # Regression (Windows CI): os.kill(pid, 0) is CTRL_C_EVENT on Windows and interrupted every process
+    # on the console whenever another runtime checked whether a lease owner was still alive.
+    import subprocess
+    import sys
+
+    from ai_engineer.tasks.store import _pid_alive
+
+    assert _pid_alive(os.getpid())
+    child = subprocess.Popen([sys.executable, "-c", "pass"])
+    child.wait(30)
+    assert not _pid_alive(child.pid)
+    assert not _pid_alive(0) and not _pid_alive(-1)
