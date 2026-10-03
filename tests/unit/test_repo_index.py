@@ -377,3 +377,23 @@ def test_stats(py_index: RepoIndex) -> None:
     assert stats["languages"]["python"] == 10
     assert stats["languages"]["markdown"] == 1
     assert stats["last_refresh"]
+
+
+def test_schema_mismatch_rebuilds_even_when_file_deletion_fails(tmp_path: Path, monkeypatch) -> None:
+    """Regression (seen on Windows): an open handle blocks deleting the DB file."""
+    root = make_python_project(tmp_path / "proj")
+    idx = open_index(root, tmp_path)
+    idx.refresh()
+    idx.close()
+    db = tmp_path / "state" / "indexes" / "index.db"
+    conn = sqlite3.connect(db)
+    conn.execute("UPDATE meta SET value = 'old' WHERE key = 'schema'")
+    conn.commit()
+    monkeypatch.setattr(RepoIndex, "_delete_db_files", lambda self: None)  # deletion "fails"
+    try:
+        idx = open_index(root, tmp_path)
+        assert idx.files() == []  # stale-schema data was not kept
+        assert idx.refresh().added == len(PYTHON_PROJECT)
+        idx.close()
+    finally:
+        conn.close()

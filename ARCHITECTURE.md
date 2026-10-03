@@ -181,14 +181,17 @@ default timeout. The `ToolExecutor` performs, in order:
 5. output truncation (head + tail) and **secret redaction**;
 6. audit log entry + `TOOL_CALLED`/`TOOL_RESULT` events + metrics.
 
-Built-in tools: `read_file`, `write_file`, `edit_file`, `list_directory`,
-`find_files`, `search_text`, `repo_overview`, `find_symbol`, `find_dependents`,
-`related_tests`, `run_command`, `process_list`, `process_stop`, `run_tests`,
-`run_linter`, `run_formatter`, `run_build`, `run_typecheck`, `git_status`,
-`git_diff`, `git_log`, `git_branch`, `git_commit`, `git_checkout`, `web_search`,
-`web_fetch`, `browser` (Playwright, optional), `db_schema`, `db_query`,
-`environment_info`, `memory_search`, `memory_record`, plus stage-control tools
-(`submit_work`, `report_findings`, …).
+Built-in tools: `read_file`, `write_file`, `edit_file`, `delete_file`,
+`list_directory`, `find_files`, `search_text`, `code_search`, `repo_overview`,
+`find_symbol`, `find_dependents`, `related_tests`, `run_command`, `process_list`,
+`process_output`, `process_stop`, `run_tests`, `run_linter`, `run_formatter`,
+`run_build`, `run_typecheck`, `git_status`, `git_diff`, `git_log`, `git_branch`,
+`git_commit`, `git_checkout`, `web_search`, `web_fetch`, `browser` (Playwright,
+optional), `db_schema`, `db_query`, `environment_info`, `memory_search`,
+`memory_record`, plus the stage-control tools `submit_work` and `submit_answer`.
+The full generated reference is in [docs/TOOL_GUIDE.md](docs/TOOL_GUIDE.md).
+During pipeline runs the orchestrator owns branches and commits, so the model is
+not offered `git_commit`, `git_branch` or `git_checkout`.
 
 ### 4.2 Permission levels and operating modes
 
@@ -282,9 +285,12 @@ TASK
 ```
 
 **Routing:** triage decides which stages run. A question ("where is auth?") runs a
-read-only research loop with cited evidence. A trivial change skips planning.
-Security/performance/docs stages run only when triage or changed files call for
-them (e.g. auth code, dependency changes).
+read-only research loop with cited evidence and skips planning, validation and
+review. Trivial and small changes skip the planner. Security and performance flags
+(set by the model's triage and by deterministic keyword detection — which can only
+add stages, never remove them) give the independent review focused, in-depth
+instructions; a dependency audit runs only when dependency manifests changed; the
+docs stage runs only when the change affects documented behaviour.
 
 **Loops are bounded:** `max_steps` per agent loop, `max_repair_iterations`,
 `max_review_iterations`, wall-clock budgets, and a loop detector for repeated
@@ -305,17 +311,19 @@ identical tool calls, repeated identical fixes, and repeated failure signatures.
 ```
 <project>/.agent/
   config.toml          project configuration (user-editable)
-  .gitignore           keeps agent state out of your repository
+  .gitignore           "*": keeps all agent state out of your repository
   state.db             SQLite (WAL): tasks, pipeline state, events, checkpoints,
-                       memory, test runs, failure records, metrics, schedules
+                       test runs, failure records, metrics, schedules, control
+  memory.db            project memory (FTS5)
   project.json         repository profile (generated)
   context.json         project context snapshot (generated from memory)
   tasks.json           task snapshot (generated)
   decisions.json       decision log snapshot (generated)
   checkpoints/         file-backup checkpoints (non-git workspaces)
   indexes/index.db     repository index
-  logs/                trace-<session>.jsonl, audit.jsonl
-  reports/             engineering reports
+  logs/                trace-<session>.jsonl, audit.jsonl, agent.log
+  reports/             <task>.md / .json reports, <task>.improvements.json
+  artifacts/           browser screenshots
 ```
 
 - **Checkpoints (git):** the working tree (tracked + untracked, honouring
@@ -362,11 +370,19 @@ summaries and evidence.
 
 ## 10. Concurrency
 
-Async I/O throughout (`asyncio`). The `parallel.JobGraph` runner executes
-independent jobs with a concurrency limit, per-job timeouts, cancellation and
-named resource locks. It is used for read-only work (indexing, independent
-static checks, parallel read-only tool calls). Subtasks that modify the
-workspace run sequentially — concurrent writers to one working tree are unsafe.
+Async I/O throughout (`asyncio`). The job-graph runner (`parallel/graph.py`)
+executes independent jobs with dependencies, a concurrency limit, per-job
+timeouts, cancellation and named exclusive resources. Concretely:
+
+- validation: lint and type checks run concurrently; tests and builds share an
+  exclusive `workspace-writers` resource, so they never overlap;
+- the model's independent read-only tool calls within one turn run concurrently
+  (`ToolExecutor.execute_many`); calls with side effects run in order;
+- repository indexing reads and parses files in a thread pool, with
+  single-threaded database writes.
+
+Subtasks that modify the workspace run sequentially — concurrent writers to one
+working tree are unsafe.
 
 ---
 
@@ -389,10 +405,18 @@ CI runs the test suite on Linux, macOS and Windows.
 
 ---
 
-## 13. Known architectural limitations
+## 13. Known limitations
 
 - Agent capability is bounded by the connected model. The harness verifies and
   constrains; it cannot make a weak model strong.
+- Provider adapters are verified against documented wire formats with mocked
+  HTTP; not every live service has been exercised (`aie providers test`).
 - Subtasks run sequentially on one working tree (no worktree-parallel execution).
-- Symbol extraction for non-Python languages is regex-based, not full AST.
-- Sandbox isolation beyond the workspace path guard requires Docker.
+- Symbol extraction for non-Python languages is regex-based, not full AST;
+  import resolution covers Python, JS/TS, Go, Rust, Java/Kotlin and C includes.
+- Isolation beyond the path guard and command policy requires Docker
+  (`[terminal] sandbox = "docker"`), which is implemented but less tested than
+  the host runner.
+- Web search needs a configured backend (SearXNG, Brave or Tavily).
+- The task budget, step budget and context management are heuristics tuned for
+  typical repositories; very large changes should be split into several tasks.

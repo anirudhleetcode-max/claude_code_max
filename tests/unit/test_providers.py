@@ -451,3 +451,63 @@ async def test_anthropic_missing_key(monkeypatch: pytest.MonkeyPatch) -> None:
     p = AnthropicProvider("anthropic", ProviderConfig(type="anthropic", api_key_env="NOPE_KEY"))
     with pytest.raises(AuthenticationError):
         await p.generate(ModelRequest(model="m", messages=[Message.user("x")]))
+
+
+async def test_anthropic_large_requests_stream_and_assemble(monkeypatch: pytest.MonkeyPatch) -> None:
+    httpx2 = pytest.importorskip("httpx2")
+    events = [
+        ("message_start", {"type": "message_start", "message": {"id": "msg_s", "type": "message", "role": "assistant", "model": "claude-test", "content": [], "stop_reason": None, "stop_sequence": None, "usage": {"input_tokens": 30, "output_tokens": 1}}}),
+        ("content_block_start", {"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}}),
+        ("content_block_delta", {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": "Hello "}}),
+        ("content_block_delta", {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": "stream"}}),
+        ("content_block_stop", {"type": "content_block_stop", "index": 0}),
+        ("content_block_start", {"type": "content_block_start", "index": 1, "content_block": {"type": "tool_use", "id": "toolu_9", "name": "read_file", "input": {}}}),
+        ("content_block_delta", {"type": "content_block_delta", "index": 1, "delta": {"type": "input_json_delta", "partial_json": "{\"path\": \"z.py\"}"}}),
+        ("content_block_stop", {"type": "content_block_stop", "index": 1}),
+        ("message_delta", {"type": "message_delta", "delta": {"stop_reason": "tool_use", "stop_sequence": None}, "usage": {"output_tokens": 12}}),
+        ("message_stop", {"type": "message_stop"}),
+    ]
+    sse = "".join(f"event: {name}\ndata: {json.dumps(data)}\n\n" for name, data in events)
+    seen: list[dict] = []
+
+    def handler(request):
+        seen.append(json.loads(request.content))
+        return httpx2.Response(200, content=sse.encode(), headers={"content-type": "text/event-stream"})
+
+    p = anthropic_provider(handler, monkeypatch, stream_threshold_tokens=1000)
+    resp = await p.generate(ModelRequest(model="claude-test", messages=[Message.user("x")], tools=[TOOL], max_tokens=64000))
+    assert seen[0]["stream"] is True and seen[0]["max_tokens"] == 64000
+    assert resp.text() == "Hello stream"
+    assert resp.tool_uses()[0].input == {"path": "z.py"}
+    assert resp.stop_reason == StopReason.TOOL_USE and resp.usage.output_tokens == 12
+
+
+async def test_anthropic_lists_models(monkeypatch: pytest.MonkeyPatch) -> None:
+    httpx2 = pytest.importorskip("httpx2")
+
+    def handler(request):
+        assert request.url.path.endswith("/v1/models")
+        return httpx2.Response(200, json={"data": [
+            {"type": "model", "id": "model-b", "display_name": "B", "created_at": "2026-01-01T00:00:00Z"},
+            {"type": "model", "id": "model-a", "display_name": "A", "created_at": "2026-01-01T00:00:00Z"},
+        ], "has_more": False, "first_id": "model-b", "last_id": "model-a"})
+
+    p = anthropic_provider(handler, monkeypatch)
+    assert await p.list_models() == ["model-a", "model-b"]
+
+
+async def test_ollama_streaming(monkeypatch: pytest.MonkeyPatch) -> None:
+    lines = [
+        {"message": {"role": "assistant", "content": "Hi "}, "done": False},
+        {"message": {"role": "assistant", "content": "there", "tool_calls": [{"function": {"name": "read_file", "arguments": {"path": "q"}}}]}, "done": False},
+        {"message": {"role": "assistant", "content": ""}, "done": True, "done_reason": "stop", "prompt_eval_count": 5, "eval_count": 3},
+    ]
+    body = "\n".join(json.dumps(x) for x in lines) + "\n"
+    rec = Recorder([httpx.Response(200, content=body.encode())])
+    p = OllamaProvider("ollama", ProviderConfig(type="ollama"))
+    p.set_transport(httpx.MockTransport(rec))
+    events = [e async for e in p.stream(ModelRequest(model="q", messages=[Message.user("x")], tools=[TOOL]))]
+    assert "".join(e.text for e in events if e.type == "text_delta") == "Hi there"
+    final = events[-1].response
+    assert final.tool_uses()[0].input == {"path": "q"} and final.usage.input_tokens == 5
+    assert rec.body()["stream"] is True

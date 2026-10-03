@@ -205,3 +205,35 @@ async def test_interrupted_subtask_is_reverified_not_assumed(tmp_path: Path) -> 
     assert resumed.status == TaskStatus.COMPLETED, resumed.error
     assert any("re-verifying" in e.message for e in events)
     assert any(e.type == EventType.TEST_PASSED for e in events)
+
+
+async def test_read_only_checks_run_concurrently_and_writers_serialize(tmp_path: Path) -> None:
+    import asyncio
+    import time
+
+    from ai_engineer.tester.models import CheckKind, CheckResult
+
+    repo = make_calc_repo(tmp_path / "repo", buggy=False)
+    rt = open_runtime(repo, {"s": ScriptedProvider("s")})
+    active = {"now": 0, "peak": 0}
+
+    async def fake_run_check(kind, *, targeted_files=None, cancel=None):
+        active["now"] += 1
+        active["peak"] = max(active["peak"], active["now"])
+        await asyncio.sleep(0.3)
+        active["now"] -= 1
+        return CheckResult(kind=kind, command=str(kind), status="passed", summary="ok")
+
+    rt.validation.run_check = fake_run_check
+    task = rt.create_task("x")
+    try:
+        started = time.monotonic()
+        results = await rt.orchestrator._run_checks_parallel(task, None, [CheckKind.LINT, CheckKind.TYPECHECK])
+        assert time.monotonic() - started < 0.55 and active["peak"] == 2
+        assert [r.kind for r in results] == [CheckKind.LINT, CheckKind.TYPECHECK]
+        active["peak"] = 0
+        started = time.monotonic()
+        await rt.orchestrator._run_checks_parallel(task, None, [CheckKind.TEST, CheckKind.BUILD])
+        assert time.monotonic() - started >= 0.55 and active["peak"] == 1  # writers never overlap
+    finally:
+        await rt.aclose()

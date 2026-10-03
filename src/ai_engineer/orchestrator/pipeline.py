@@ -273,8 +273,8 @@ class Orchestrator:
             self._emit(EventType.INFO, "Running baseline checks before any change")
             from ..tester.models import CheckKind
 
-            for kind in (CheckKind.TEST, CheckKind.LINT, CheckKind.TYPECHECK):
-                result = await self._run_check(task, None, kind, None, baseline=True)
+            kinds = [CheckKind.TEST, CheckKind.LINT, CheckKind.TYPECHECK]
+            for kind, result in zip(kinds, await self._run_checks_parallel(task, None, kinds, baseline=True), strict=True):
                 state.baseline[str(kind)] = result.model_dump(mode="json")
         state.stage = "plan" if u.task_type == "change" else "answer"
         self._save(task, state)
@@ -582,17 +582,48 @@ class Orchestrator:
             else:
                 results.append(await self._run_check(task, sub_id, CheckKind.TEST, None))
             lintable = [f for f in changed if (self.rt.workspace / f).exists()]
-            results.append(await self._run_check(task, sub_id, CheckKind.LINT, lintable or None))
-            results.append(await self._run_check(task, sub_id, CheckKind.TYPECHECK, None))
+            results += await self._run_checks_parallel(
+                task, sub_id, [CheckKind.LINT, CheckKind.TYPECHECK], targeted={CheckKind.LINT: lintable or None}
+            )
         else:
-            for kind in (CheckKind.TEST, CheckKind.LINT, CheckKind.TYPECHECK, CheckKind.BUILD):
-                results.append(await self._run_check(task, sub_id, kind, None))
+            results += await self._run_checks_parallel(task, sub_id, [CheckKind.TEST, CheckKind.LINT, CheckKind.TYPECHECK, CheckKind.BUILD])
         summary = [r.model_dump(mode="json", exclude={"output_tail"}) for r in results]
         if sub is not None and sub.id in state.subtasks:
             state.subtasks[sub.id].validation = summary
         else:
             state.final_validation = summary
         self._save(task, state)
+        return results
+
+    async def _run_checks_parallel(
+        self, task: Task, sub_id: str | None, kinds: list[Any], *, baseline: bool = False, targeted: dict[Any, list[str] | None] | None = None,
+    ) -> list[Any]:
+        """Run independent checks concurrently via the job graph.
+
+        Lint and type checks only read the tree, so they run in parallel. Tests and
+        builds can write artifacts, so they share an exclusive resource lock.
+        Results are returned in the order of ``kinds``.
+        """
+        from ..parallel.graph import Job, run_jobs
+        from ..tester.models import CheckKind
+
+        targeted = targeted or {}
+        writers = {CheckKind.TEST, CheckKind.BUILD}
+
+        def make(kind: Any) -> Job:
+            async def fn() -> Any:
+                return await self._run_check(task, sub_id, kind, targeted.get(kind), baseline=baseline)
+
+            return Job(id=str(kind), fn=fn, resources={"workspace-writers"} if kind in writers else set())
+
+        outcome = await run_jobs([make(k) for k in kinds], max_concurrency=3, cancel=self.rt.tool_ctx.cancel)
+        self.rt.tool_ctx.cancel.raise_if_cancelled()
+        results = []
+        for kind in kinds:
+            job = outcome[str(kind)]
+            if job.status != "ok":
+                raise RuntimeError(f"{kind} check could not run: {job.status} {job.error}")
+            results.append(job.value)
         return results
 
     def _related_tests(self, changed: list[str]) -> list[str]:
@@ -629,7 +660,7 @@ class Orchestrator:
                 self.rt.router.for_role("reviewer"), task=f"{task.description}\n\nSubtask {sub.id}: {sub.title}\n{sub.description}",
                 criteria=criteria, diff=diff, validation_summary=self._validation_summary(results), deleted_files=deleted,
                 repo_has_tests=bool(self.rt.profile and self.rt.profile.test_files), project_brief=self.rt.context.project_brief(max_chars=2000),
-                cancel=self.rt.tool_ctx.cancel,
+                cancel=self.rt.tool_ctx.cancel, focus=self._review_focus(u),
             )
             st.review = review.model_dump()
             st.review_iterations = iteration + 1
@@ -646,6 +677,16 @@ class Orchestrator:
             await self._run_loop(role="coder", stage="review_fix", prompt="fixer", message=message, finish="submit_work", tools=tools)
             results = await self._validate_and_repair(task, state, sub, st, scope="subtask")
         return review, findings, results
+
+    @staticmethod
+    def _review_focus(u: TaskUnderstanding) -> list[str]:
+        """Triage-driven routing: extra review depth only where the task calls for it."""
+        focus = []
+        if u.needs.security_review:
+            focus.append("security")
+        if u.needs.performance_review:
+            focus.append("performance")
+        return focus
 
     def _subtask_gates(self, state: PipelineState, u: TaskUnderstanding, sub: Subtask, st: SubtaskState, results: list[Any], review: ReviewResult | None, findings: list[Any]) -> GateReport:
         gates = self.settings.gates.model_copy(update={"docs": GateMode.DISABLED, "git_state": GateMode.DISABLED, "build": GateMode.DISABLED})
@@ -723,7 +764,7 @@ class Orchestrator:
                     self.rt.router.for_role("reviewer"), task=task.description, criteria=u.acceptance_criteria, diff=diff,
                     validation_summary=self._validation_summary(results), deleted_files=[f for f in changed if not (self.rt.workspace / f).exists()],
                     repo_has_tests=bool(self.rt.profile and self.rt.profile.test_files), project_brief=self.rt.context.project_brief(max_chars=2000),
-                    cancel=self.rt.tool_ctx.cancel,
+                    cancel=self.rt.tool_ctx.cancel, focus=self._review_focus(u),
                 )
                 self._emit(EventType.REVIEW_COMPLETED, f"Final review: {review.verdict}", verdict=review.verdict, blocking=len(review.blocking()))
             state.final_review = review.model_dump()

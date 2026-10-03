@@ -57,6 +57,9 @@ def test_secret_env_name_heuristics() -> None:
     assert not is_secret_env_name("GIT_AUTHOR_NAME")
     assert not is_secret_env_name("MAX_THINKING_TOKENS")
     assert not is_secret_env_name("SSH_KEY_PATH")
+    assert not is_secret_env_name("PWD") and not is_secret_env_name("OLDPWD")
+    assert is_secret_env_name("DB_PWD")
+    assert secret_env_values({"API_TOKEN_LOCATION": "/home/user/project"}) == set()
     assert secret_env_values({"X_TOKEN": "short"}) == set()
 
 

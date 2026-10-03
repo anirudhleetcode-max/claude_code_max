@@ -5,6 +5,7 @@ Intended for verifying web UIs the agent builds (usually on localhost).
 
 from __future__ import annotations
 
+import os
 from typing import Any, Literal
 
 from pydantic import Field
@@ -25,7 +26,7 @@ class BrowserSession:
         self._browser: Any = None
         self.page: Any = None
 
-    async def ensure(self) -> Any:
+    async def ensure(self, executable: str | None = None) -> Any:
         if self.page is not None:
             return self.page
         try:
@@ -34,11 +35,17 @@ class BrowserSession:
             raise ToolError("playwright is not installed; run: pip install 'ai-engineer[browser]'") from exc
         self._pw = await async_playwright().start()
         try:
-            self._browser = await self._pw.chromium.launch(headless=True)
+            kwargs: dict[str, Any] = {"headless": True}
+            if executable:
+                kwargs["executable_path"] = executable
+            self._browser = await self._pw.chromium.launch(**kwargs)
         except Exception as exc:
             await self._pw.stop()
             self._pw = None
-            raise ToolError(f"could not launch a browser ({exc}); run `playwright install chromium`") from exc
+            raise ToolError(
+                f"could not launch a browser ({str(exc).splitlines()[0][:200]}); run `playwright install chromium` "
+                "or set [web] browser_executable / AIE_BROWSER_EXECUTABLE to an installed Chrome/Chromium"
+            ) from exc
         self.page = await self._browser.new_page()
         return self.page
 
@@ -78,7 +85,8 @@ class BrowserTool(Tool):
         if args.action == "close":
             await session.close()
             return ToolResult(content="browser closed")
-        page = await session.ensure()
+        executable = ctx.settings.web.browser_executable or os.environ.get("AIE_BROWSER_EXECUTABLE")
+        page = await session.ensure(executable)
         try:
             if args.action == "goto":
                 if not args.url or not args.url.startswith(("http://", "https://")):

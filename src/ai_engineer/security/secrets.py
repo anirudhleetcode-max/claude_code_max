@@ -74,7 +74,8 @@ _SECRET_ENV_NAME = re.compile(
     r"(?i)(api[_\-]?key|_key$|^key$|token|secret|passw|pwd|credential|private|cookie|session[_\-]?id|"
     r"auth[_\-]?(?:token|key|header)|access[_\-]?key)"
 )
-_SAFE_ENV_NAMES = re.compile(r"(?i)(author|committer|_file$|_path$|_dir$|_url$|_host$|_port$|max_.*tokens|tokens?_limit)")
+_SAFE_ENV_NAMES = re.compile(r"(?i)(^(old)?pwd$|author|committer|_file$|_path$|_dir$|_url$|_host$|_port$|max_.*tokens|tokens?_limit)")
+_PATH_VALUE = re.compile(r"^(/|~|[A-Za-z]:[\\/])[^\s]*$")
 
 
 def shannon_entropy(value: str) -> float:
@@ -170,6 +171,8 @@ def secret_env_values(environ: Mapping[str, str] | None = None) -> set[str]:
     for name, value in env.items():
         if not value or len(value) < 8 or value.isdigit() or value.lower() in ("true", "false"):
             continue
+        if _PATH_VALUE.match(value):
+            continue  # filesystem paths are not credentials
         if _SECRET_ENV_NAME.search(name) and not _SAFE_ENV_NAMES.search(name):
             values.add(value)
     return values

@@ -265,6 +265,9 @@ class WebSettings(_Section):
     allow_domains: list[str] = Field(default_factory=list)
     block_domains: list[str] = Field(default_factory=list)
     timeout_s: float = 30.0
+    # Use an existing Chrome/Chromium instead of Playwright's bundled browser
+    # (also settable with AIE_BROWSER_EXECUTABLE).
+    browser_executable: str | None = None
 
 
 class UISettings(_Section):

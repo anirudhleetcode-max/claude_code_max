@@ -298,3 +298,14 @@ def test_baseline_failures_in_scope_are_not_excused() -> None:
     assert compare_with_baseline(current, baseline)[0] is True  # unrelated work: pre-existing
     only_pre, new = compare_with_baseline(current, baseline, {"tests/test_calc.py"})
     assert only_pre is False and new == ["test:tests/test_calc.py::test_add"]
+
+
+async def test_triage_focus_reaches_the_reviewer() -> None:
+    good = '{"verdict": "approve", "summary": "ok", "issues": [], "requirements": []}'
+    provider = ScriptedProvider("r", steps=[good, good])
+    router = make_router(provider)
+    diff = "+++ b/x.py\n@@ -0,0 +1 @@\n+x = 1\n"
+    await review_change(router.for_role("reviewer"), task="t", criteria=[], diff=diff, validation_summary="", focus=["security"])
+    assert "security (in depth)" in provider.requests[0].messages[0].text()
+    await review_change(router.for_role("reviewer"), task="t", criteria=[], diff=diff, validation_summary="")
+    assert "Focus areas" not in provider.requests[1].messages[0].text()

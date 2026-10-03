@@ -230,3 +230,17 @@ async def test_end_to_end_real_pytest(tmp_path: Path) -> None:
     assert targeted.passed == 1
     assert targeted.command.endswith("tests/test_ok.py")
     assert len(eng.history) == 3
+
+
+def test_windows_style_relative_paths_are_normalized(tmp_path: Path) -> None:
+    from ai_engineer.tester.models import CheckResult, Diagnostic, TestCaseFailure
+
+    eng = ValidationEngine(tmp_path, Settings(), None)
+    result = CheckResult(
+        kind=CheckKind.TEST, command="pytest", status="failed",
+        failures=[TestCaseFailure(test_id="tests/test_x.py::t", file="tests\\test_x.py", line=3)],
+        diagnostics=[Diagnostic(file="src\\pkg\\a.py", line=1, message="m")],
+    )
+    eng._relativize(result, tmp_path)
+    assert result.failures[0].file == "tests/test_x.py"
+    assert result.diagnostics[0].file == "src/pkg/a.py"

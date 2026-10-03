@@ -125,18 +125,21 @@ class ValidationEngine:
                     continue
             return path
 
+        def posix(path: str | None) -> str | None:
+            # tools print OS-native separators (tests\\x.py on Windows); everything downstream
+            # (related-test matching, gates, reports) uses workspace-relative POSIX paths
+            return path.replace("\\", "/") if path and not _is_abs(path) else path
+
         if cwd == self.workspace:
             for f in result.failures:
-                if f.file and _is_abs(f.file):
-                    f.file = rel(f.file)
+                f.file = posix(rel(f.file) if f.file and _is_abs(f.file) else f.file)
             for d in result.diagnostics:
-                if d.file and _is_abs(d.file):
-                    d.file = rel(d.file)
+                d.file = posix(rel(d.file) if d.file and _is_abs(d.file) else d.file)
             return
         for f in result.failures:
-            f.file = rel(f.file)
+            f.file = posix(rel(f.file))
         for d in result.diagnostics:
-            d.file = rel(d.file)
+            d.file = posix(rel(d.file))
 
     async def run_command(self, vc: ValidationCommand, cancel: CancellationToken | None = None) -> CheckResult:
         """Run one validation command and parse its output."""

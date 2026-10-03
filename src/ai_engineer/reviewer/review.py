@@ -102,6 +102,13 @@ def deterministic_review(diff: str, deleted_files: list[str] | None = None, repo
     return issues, findings
 
 
+FOCUS_TEXT = {
+    "security": "security (in depth): authentication and authorization checks, secret handling, input validation, "
+    "injection (SQL, shell, template, path traversal), unsafe deserialization, TLS verification, error messages leaking data",
+    "performance": "performance (in depth): algorithmic complexity on realistic input sizes, N+1 queries, unnecessary I/O or "
+    "allocations in hot paths, missing caching or batching, blocking calls in async code",
+}
+
 REVIEW_SYSTEM = """You are an independent senior code reviewer. You did not write this change. Review it
 skeptically and precisely against the task requirements. Check: correctness, requirements coverage,
 edge cases, error handling, security, performance, maintainability, readability, type safety,
@@ -128,6 +135,7 @@ async def model_review(
     project_brief: str = "",
     max_diff_chars: int = 60000,
     cancel: Any = None,
+    focus: list[str] | None = None,
 ) -> ReviewResult:
     """Ask the reviewer model for a structured review. Raises on model failure."""
     det = "\n".join(f"- [{i.severity}] {i.file or ''}:{i.line or ''} {i.description}" for i in deterministic) or "(none)"
@@ -135,6 +143,7 @@ async def model_review(
     content = (
         f"## Task\n{task}\n\n## Acceptance criteria\n{crit}\n\n"
         + (f"## Project\n{project_brief}\n\n" if project_brief else "")
+        + (("## Focus areas requested by triage\n" + "\n".join(f"- {FOCUS_TEXT.get(f, f)}" for f in focus) + "\n\n") if focus else "")
         + f"## Validation results (actually executed)\n{validation_summary or '(none)'}\n\n"
         f"## Automated findings\n{det}\n\n"
         f"## Diff\n```diff\n{truncate_middle(diff, max_diff_chars)}\n```"
@@ -184,6 +193,7 @@ async def review_change(
     use_model: bool = True,
     project_brief: str = "",
     cancel: Any = None,
+    focus: list[str] | None = None,
 ) -> tuple[ReviewResult, list[SecurityFinding]]:
     deterministic, findings = deterministic_review(diff, deleted_files, repo_has_tests)
     model_result: ReviewResult | None = None
@@ -192,7 +202,7 @@ async def review_change(
         try:
             model_result = await model_review(
                 model, task=task, criteria=criteria, diff=diff, validation_summary=validation_summary,
-                deterministic=deterministic, project_brief=project_brief, cancel=cancel,
+                deterministic=deterministic, project_brief=project_brief, cancel=cancel, focus=focus,
             )
         except (AllModelsFailedError, MalformedOutputError) as exc:
             note = f"model review unavailable ({type(exc).__name__}); deterministic checks only"

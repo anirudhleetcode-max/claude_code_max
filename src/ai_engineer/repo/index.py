@@ -570,6 +570,20 @@ class RepoIndex:
             with contextlib.suppress(OSError):
                 Path(str(self.db_path) + suffix).unlink()
 
+    @staticmethod
+    def _drop_all_tables(conn: sqlite3.Connection) -> None:
+        for _ in range(3):  # virtual tables first; their shadow tables disappear with them
+            rows = conn.execute(
+                "SELECT name, sql FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
+            ).fetchall()
+            if not rows:
+                return
+            ordered = sorted(rows, key=lambda r: 0 if (r[1] or "").upper().startswith("CREATE VIRTUAL") else 1)
+            for name, _sql in ordered:
+                with contextlib.suppress(sqlite3.DatabaseError):
+                    conn.execute(f'DROP TABLE IF EXISTS "{name}"')
+            conn.commit()
+
     def _open(self) -> sqlite3.Connection:
         want_fts = fts5_available()
         conn = self._connect()
@@ -586,6 +600,9 @@ class RepoIndex:
             conn.close()
             self._delete_db_files()
             conn = self._connect()
+            # Deleting can fail silently (e.g. Windows keeps open files locked); never keep
+            # stale-schema data under a new version stamp: drop everything in place instead.
+            self._drop_all_tables(conn)
         conn.executescript(_SCHEMA)
         fts = False
         if want_fts:
