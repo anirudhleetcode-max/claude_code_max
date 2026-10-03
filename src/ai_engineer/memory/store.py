@@ -41,6 +41,9 @@ _MAX_TERMS = 32
 _HASH_CACHE_MAX = 4096
 
 
+INVALIDATED_MARK = "(invalidated)"
+
+
 class MemoryLayer(StrEnum):
     SESSION = "session"
     PROJECT = "project"
@@ -301,6 +304,11 @@ class MemoryStore:
             stale = [rel for rel, digest in item.file_refs.items() if (self._hash_ref(rel) or "") != digest]
             item.stale = bool(stale)
             item.stale_files = sorted(stale)
+        if item.meta.get("invalidated"):
+            # explicitly invalidated (e.g. `aie memory invalidate`): kept for history, ranked last,
+            # and flagged in prompts so the repository is checked instead of trusting it
+            item.stale = True
+            item.stale_files = [*item.stale_files, INVALIDATED_MARK]
         return item
 
     def _fetch(self, sql: str, params: Iterable[Any] = ()) -> list[sqlite3.Row]:
@@ -474,6 +482,8 @@ class MemoryStore:
             new_conf = row["confidence"] if confidence is None else _clamp(confidence)
             new_tags = json.loads(row["tags"]) if tags is None else self._clean_tags(tags)
             new_meta = {**json.loads(row["meta"]), **self.redactor.redact(dict(meta or {}))}
+            if content is not None:
+                new_meta.pop("invalidated", None)  # new content is a fresh assertion
             refs: dict[str, str] = json.loads(row["file_refs"])
             if content is not None and new_content != row["content"]:
                 refs = self._capture_refs(refs)  # re-asserted against the current files
@@ -499,6 +509,35 @@ class MemoryStore:
             out = self._get_row(conn, new_id_)
         assert out is not None
         return self._row_to_item(out)
+
+    def invalidate(self, *, layer: str | None = None, kind: str | None = None, item_id: str | None = None) -> int:
+        """Mark active items as no longer trustworthy without deleting them. Returns how many changed.
+
+        Invalidated items stay searchable (ranked after fresh ones) and are flagged as stale, so the
+        agent re-checks the repository instead of relying on them.
+        """
+        clauses, params = ["active = 1"], []
+        if layer is not None:
+            clauses.append("layer = ?")
+            params.append(layer)
+        if kind is not None:
+            clauses.append("kind = ?")
+            params.append(kind)
+        if item_id is not None:
+            clauses.append("lineage = (SELECT lineage FROM memory_items WHERE id = ?)")
+            params.append(item_id)
+        changed = 0
+        stamp = utcnow_iso()
+        with self._tx() as conn:
+            rows = conn.execute(f"SELECT seq, meta FROM memory_items WHERE {' AND '.join(clauses)}", params).fetchall()  # noqa: S608
+            for row in rows:
+                meta = json.loads(row["meta"])
+                if meta.get("invalidated"):
+                    continue
+                meta["invalidated"] = stamp
+                conn.execute("UPDATE memory_items SET meta = ? WHERE seq = ?", (json.dumps(meta, default=str), row["seq"]))
+                changed += 1
+        return changed
 
     def forget(self, item_id: str) -> bool:
         """Deactivate every version in the item's lineage. True if anything was active."""

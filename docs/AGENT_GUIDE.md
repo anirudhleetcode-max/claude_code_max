@@ -146,6 +146,11 @@ printed token.
 | `aie daemon` | continuously run queued tasks and recurring schedules |
 | `aie report` | print a task's engineering report |
 | `aie checkpoints` | list, diff or restore checkpoints |
+| `aie restore` | restore a checkpoint (the current state is checkpointed first, so it can be undone) |
+| `aie logs` | show a task's activity log (latest task by default) |
+| `aie project` | show what the agent knows about this project, or invalidate it |
+| `aie test` | run the project's tests and checks (no model involved) |
+| `aie review` | independently review the current changes |
 | `aie memory` | search and edit agent memory |
 | `aie providers` | list providers, their models, or test a role |
 | `aie doctor` | check environment, configuration and provider health |

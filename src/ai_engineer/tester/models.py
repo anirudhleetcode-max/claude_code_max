@@ -111,6 +111,28 @@ class CheckResult(BaseModel):
     def ok(self) -> bool:
         return self.status == "passed"
 
+    def outcome(self) -> str:
+        """The user-facing verdict for this single run.
+
+        PASS, FAIL (real failures, including hangs), ENVIRONMENT_ERROR (the tooling or environment
+        broke, e.g. a missing dependency), UNAVAILABLE (no command or tool to run), SKIPPED,
+        CANCELLED, or UNVERIFIED (the command ran but verified nothing, e.g. no tests collected).
+        Whether a failure is NEW or PRE_EXISTING is decided against a baseline by the gates.
+        """
+        if self.status == "passed":
+            return "PASS"
+        if self.status == "unavailable" or self.classification == "command_not_found":
+            return "UNAVAILABLE"
+        if self.status == "skipped":
+            return "SKIPPED"
+        if self.status == "cancelled":
+            return "CANCELLED"
+        if self.classification == "no_tests":
+            return "UNVERIFIED"
+        if self.status == "error" or self.classification in ("environment", "missing_dependency"):
+            return "ENVIRONMENT_ERROR"
+        return "FAIL"
+
     def signature(self) -> str:
         """Stable fingerprint of *what* failed; identical failures give identical signatures."""
         if self.ok():

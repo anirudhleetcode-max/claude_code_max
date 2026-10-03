@@ -10,7 +10,10 @@ from ..core.util import atomic_write_json, utcnow_iso
 from .store import MemoryItem, MemoryLayer, MemoryStore
 
 CONTEXT_HEADER = "Memory (hints from earlier work — verify against the repository; repository state wins):"
-STALE_NOTE = "Items marked STALE reference files that changed after they were recorded; re-check them before relying on them."
+STALE_NOTE = (
+    "Items marked STALE reference files that changed after they were recorded, or were invalidated; "
+    "the repository is the source of truth: re-check them before relying on them."
+)
 
 
 def command_confidence(successes: int, failures: int) -> float:
@@ -56,6 +59,10 @@ class MemoryManager:
         # Stable sort keeps project items ahead of global ones on equal keys.
         merged.sort(key=lambda i: (i.stale, -i.score, -i.confidence))
         return merged[:limit]
+
+    def invalidate(self, *, layer: str | None = None, kind: str | None = None, item_id: str | None = None) -> int:
+        """Invalidate matching items in every store (see ``MemoryStore.invalidate``)."""
+        return sum(store.invalidate(layer=layer, kind=kind, item_id=item_id) for store in self._stores())
 
     def context_block(self, query: str, limit: int = 8) -> str:
         """Prompt-ready memory hints for ``query`` ("" when nothing is relevant)."""

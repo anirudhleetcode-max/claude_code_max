@@ -349,6 +349,19 @@ def cmd_memory(args: argparse.Namespace) -> int:
         elif args.mem_cmd == "forget":
             ok = mem.project.forget(args.item_id) or (mem.global_store.forget(args.item_id) if mem.global_store else False)
             _out("forgotten" if ok else "not found")
+        elif args.mem_cmd == "update":
+            store = mem.project if mem.project.get(args.item_id) else mem.global_store
+            if store is None or store.get(args.item_id) is None:
+                _err("not found")
+                return 1
+            item = store.update(args.item_id, content=" ".join(args.content), confidence=args.confidence)
+            _out(f"updated {args.item_id} → {item.id} (v{item.version})")
+        elif args.mem_cmd == "invalidate":
+            if not (args.layer or args.kind or args.id or args.all):
+                _err("say what to invalidate: --layer, --kind, --id or --all")
+                return 64
+            count = mem.invalidate(layer=args.layer, kind=args.kind, item_id=args.id)
+            _out(f"invalidated {count} item(s); they stay in history and are flagged STALE until re-confirmed")
         elif args.mem_cmd == "history":
             for item in mem.project.history(args.item_id):
                 _out(f"v{item.version} {item.updated} active={item.active}: {item.content}")
@@ -387,7 +400,7 @@ def cmd_providers(args: argparse.Namespace) -> int:
             else:
                 for name in rt.router.registry.names():
                     cfg = rt.settings.models.providers.get(name)
-                    key = f" key={cfg.api_key_env}{'(set)' if cfg and cfg.api_key_env and os.environ.get(cfg.api_key_env) else '(missing)' if cfg and cfg.api_key_env else ''}" if cfg else ""
+                    key = f" key={cfg.api_key_env} ({'set' if os.environ.get(cfg.api_key_env) else 'NOT SET'})" if cfg and cfg.api_key_env else ""
                     _out(f"{name}: type={cfg.type if cfg else '?'}{' url=' + cfg.base_url if cfg and cfg.base_url else ''}{key}")
                 roles = rt.router.configured_roles()
                 _out("Roles: " + ("; ".join(f"{r} → {' → '.join(c)}" for r, c in roles.items()) if roles else "none configured (set AIE_MODEL)"))
@@ -398,48 +411,214 @@ def cmd_providers(args: argparse.Namespace) -> int:
     return asyncio.run(go())
 
 
-def cmd_doctor(args: argparse.Namespace) -> int:
-    from ..tools.builtin.env import format_environment, inspect_environment
+def _latest_task_id(rt: Any) -> str | None:
+    tasks = rt.store.list_tasks(top_level=True, limit=1)
+    return tasks[0].id if tasks else None
 
-    ws = _workspace(args)
-    _out(f"AI Engineer {__version__}")
-    _out(f"Workspace: {ws}")
-    _out(f"Global config: {global_config_dir() / 'config.toml'}")
-    _out(format_environment(inspect_environment(ws)))
-    problems = 0
-    try:
-        rt = _open(args)
-    except ConfigError as exc:
-        _out(f"✘ configuration: {exc}")
-        return 78
+
+def cmd_logs(args: argparse.Namespace) -> int:
+    rt = _open(args)
 
     async def go() -> int:
-        nonlocal problems
         try:
-            _out(f"Mode: {rt.settings.permissions.mode}; permission ceiling: {rt.policy.ceiling.name}")
-            _out(f"Git: {'yes' if rt.git else 'no (file-backup checkpoints)'}; memory: {'yes' if rt.memory else 'no'}; index: {'yes' if rt.index else 'no'}")
-            checks = rt.validation.checks()
-            for kind, vc in checks.items():
-                if vc is None:
-                    _out(f"  {kind}: not detected")
-                else:
-                    _out(f"  {kind}: {vc.command}" + ("" if vc.available else f"  ✘ {vc.unavailable_reason}"))
-            roles = rt.router.configured_roles()
-            if not roles:
-                _out("✘ no model configured: set AIE_MODEL=provider:model or [models.roles] in .agent/config.toml")
-                problems += 1
-            for name in rt.router.registry.names():
-                try:
-                    health = await asyncio.wait_for(rt.router.registry.get(name).health_check(), 20)
-                    mark = "✔" if health.ok else "✘"
-                    _out(f"{mark} provider {name}: {health.detail}" + (f" ({len(health.models)} models)" if health.models else ""))
-                except Exception as exc:
-                    _out(f"✘ provider {name}: {exc}")
-            return 1 if problems else 0
+            task_id = args.task_id or _latest_task_id(rt)
+            if task_id is None:
+                _err("No tasks yet.")
+                return 1
+            task = rt.store.require_task(task_id)
+            types = {t.upper() for t in args.type or []}
+
+            def show(events: list[dict[str, Any]]) -> None:
+                for e in events:
+                    if types and e["type"] not in types:
+                        continue
+                    _out(f"{e['ts']} {e['type']:<22} {e['message']}")
+
+            events, _, _ = rt.store.events_page(task.id, None, args.limit)
+            show(events)
+            last = events[-1]["id"] if events else None
+            while args.follow:
+                await asyncio.sleep(1.0)
+                more, _, _ = rt.store.events_page(task.id, last, 500)
+                show(more)
+                last = more[-1]["id"] if more else last
+                current = rt.store.require_task(task.id)
+                if not more and current.status != TaskStatus.RUNNING:
+                    _out(f"-- task {current.status}")
+                    break
+            return 0
+        finally:
+            await rt.aclose()
+
+    try:
+        return asyncio.run(go())
+    except KeyboardInterrupt:
+        return 0
+
+
+def cmd_restore(args: argparse.Namespace) -> int:
+    args.cp_cmd = "restore"
+    return cmd_checkpoints(args)
+
+
+def cmd_project(args: argparse.Namespace) -> int:
+    rt = _open(args)
+
+    async def go() -> int:
+        try:
+            if args.project_cmd == "invalidate":
+                return await _invalidate_project(rt)
+            profile = await rt.ensure_profile(refresh=args.refresh)
+            _out(f"Workspace: {rt.workspace}")
+            if rt.git is not None:
+                status = await rt.git.status()
+                _out(f"Git: branch {status.branch or '(detached)'}; {'clean' if status.clean else f'{len(status.entries)} uncommitted path(s)'}")
+            else:
+                _out("Git: not a repository (file-backup checkpoints)")
+            data = profile.model_dump() if profile is not None else {}
+            for key in ("primary_language", "languages", "frameworks", "package_managers", "file_count"):
+                if data.get(key):
+                    value = data[key]
+                    if isinstance(value, dict):
+                        value = ", ".join(
+                            f"{k} ({v.get('files')} files)" if isinstance(v, dict) and "files" in v else f"{k} {v}"
+                            for k, v in list(value.items())[:8]
+                        )
+                    elif isinstance(value, list):
+                        value = ", ".join(str(v) for v in value[:12])
+                    _out(f"{key.replace('_', ' ').capitalize()}: {value}")
+            for kind, vc in rt.validation.checks().items():
+                _out(f"  {kind}: {vc.command if vc else 'not detected'}" + ("" if vc is None or vc.available else f" (unavailable: {vc.unavailable_reason})"))
+            if rt.index is not None:
+                stats = rt.index.stats()
+                _out("Index: " + ", ".join(f"{k} {v}" for k, v in stats.items() if isinstance(v, (int, float, str)))[:300])
+            counts: dict[str, int] = {}
+            for t in rt.store.list_tasks(top_level=True, limit=1000):
+                counts[str(t.status)] = counts.get(str(t.status), 0) + 1
+            _out("Tasks: " + (", ".join(f"{k} {v}" for k, v in sorted(counts.items())) or "none"))
+            if rt.memory is not None:
+                _out(f"Memory: {rt.memory.project.count()} project item(s)")
+            return 0
         finally:
             await rt.aclose()
 
     return asyncio.run(go())
+
+
+async def _invalidate_project(rt: Any) -> int:
+    """Drop cached project knowledge so the next run re-learns it from the repository."""
+    removed = []
+    profile = rt.state_dir / "project.json"
+    if profile.exists():
+        profile.unlink()
+        removed.append("repository profile")
+    if rt.index is not None:
+        with contextlib.suppress(Exception):
+            rt.index.close()
+        rt.index = None
+    for path in sorted((rt.state_dir / "indexes").glob("index.db*")):
+        with contextlib.suppress(OSError):
+            path.unlink()
+            if path.name == "index.db":
+                removed.append("code index")
+    invalidated = rt.memory.invalidate(layer="project") if rt.memory is not None else 0
+    _out("Invalidated: " + ", ".join([*removed, f"{invalidated} project memory item(s)"]))
+    _out("They are rebuilt from the repository on the next run (or now with `aie index` / `aie project --refresh`).")
+    return 0
+
+
+def cmd_test(args: argparse.Namespace) -> int:
+    from ..tester.models import CheckKind
+
+    rt = _open(args)
+    order = [CheckKind.TEST, CheckKind.LINT, CheckKind.TYPECHECK, CheckKind.BUILD, CheckKind.FORMAT, CheckKind.AUDIT]
+    if args.kind == ["all"]:
+        kinds = order
+    elif args.kind:
+        kinds = [CheckKind(k) for k in args.kind]
+    else:
+        kinds = [CheckKind.TEST, CheckKind.LINT, CheckKind.TYPECHECK]
+
+    async def go() -> int:
+        try:
+            await rt.ensure_profile()
+            results = []
+            for kind in kinds:
+                result = await rt.validation.run_check(kind, targeted_files=args.files or None)
+                result.output_tail = rt.redactor.redact_text(result.output_tail or "")
+                results.append(result)
+                counts = "" if result.passed is None and result.failed is None else f" ({result.passed or 0} passed, {result.failed or 0} failed)"
+                _out(f"{result.outcome():<17} {kind:<10}{counts} {result.summary or result.status}" + (f"\n                  $ {result.command}" if result.command else ""))
+                if args.verbose and result.output_tail and not result.ok():
+                    _out(result.output_tail[-3000:])
+            if args.json:
+                _out(json.dumps([r.model_dump(mode="json") for r in results], indent=2))
+            outcomes = {r.outcome() for r in results}
+            if "FAIL" in outcomes:
+                return 1
+            if outcomes & {"ENVIRONMENT_ERROR", "UNAVAILABLE", "UNVERIFIED", "CANCELLED"}:
+                return 2  # nothing failed, but not everything was verified
+            return 0
+        finally:
+            await rt.aclose()
+
+    return asyncio.run(go())
+
+
+def cmd_review(args: argparse.Namespace) -> int:
+    from ..reviewer.review import review_change
+    from ..security.secrets import redact_secret_files_in_diff
+
+    rt = _open(args)
+
+    async def go() -> int:
+        try:
+            if args.checkpoint:
+                diff = await rt.checkpoints.diff_since(args.checkpoint)
+                changed = await rt.checkpoints.changed_files_since(args.checkpoint)
+            elif rt.git is None:
+                _err("Not a git repository: review a checkpoint instead (aie review --checkpoint <id>).")
+                return 64
+            elif args.staged:
+                diff = await rt.git.diff(staged=True)
+                changed = [f for f in (await rt.git.run("diff", "--cached", "--name-only", "-z")).split("\0") if f]
+            else:
+                base = args.base or "HEAD"
+                diff = await rt.git.diff_since(base)
+                changed = await rt.git.changed_files_since(base)
+            diff = redact_secret_files_in_diff(diff, rt.tool_ctx.guard.is_secret_file)
+            if not diff.strip():
+                _out("Nothing to review: no changes.")
+                return 0
+            await rt.ensure_profile()
+            result, findings = await review_change(
+                None if args.no_model else rt.router.for_role("reviewer"),
+                task=args.task or "Review these changes for correctness, security and maintainability.",
+                criteria=args.criterion or [], diff=diff, validation_summary="(validation not run by `aie review`; use `aie test`)",
+                deleted_files=[f for f in changed if not (rt.workspace / f).exists()],
+                repo_has_tests=bool(rt.profile and rt.profile.test_files), project_brief=rt.context.project_brief(max_chars=2000),
+                use_model=not args.no_model,
+            )
+            if args.json:
+                _out(json.dumps({"review": result.model_dump(), "security_findings": [f.to_dict() for f in findings]}, indent=2))
+            else:
+                _out(result.render())
+            if result.source in ("deterministic", "deterministic-only"):
+                _out("UNVERIFIED: no independent model review ran (automated checks only).")
+                return 2 if result.verdict == "approve" else 1
+            return 0 if result.verdict == "approve" else 1
+        finally:
+            await rt.aclose()
+
+    return asyncio.run(go())
+
+
+def cmd_doctor(args: argparse.Namespace) -> int:
+    from .doctor import FAIL, Doctor, as_json, render
+
+    checks = Doctor(_workspace(args), _overrides(args), connect=not args.offline, timeout_s=args.timeout).run()
+    _out(json.dumps(as_json(checks), indent=2) if args.json else render(checks))
+    return 1 if any(c.status == FAIL for c in checks) else 0
 
 
 def cmd_inspect(args: argparse.Namespace) -> int:
@@ -599,7 +778,7 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--limit", type=int, default=15)
     sp.set_defaults(func=cmd_status)
 
-    sp = sub.add_parser("tasks", help="manage tasks and the queue")
+    sp = sub.add_parser("tasks", aliases=["task"], help="manage tasks and the queue")
     tsub = sp.add_subparsers(dest="tasks_cmd")
     tl = tsub.add_parser("list")
     tl.add_argument("--all", action="store_true", help="include subtasks")
@@ -631,7 +810,7 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("task_id")
     sp.set_defaults(func=cmd_report)
 
-    sp = sub.add_parser("checkpoints", help="list, diff or restore checkpoints")
+    sp = sub.add_parser("checkpoints", aliases=["checkpoint"], help="list, diff or restore checkpoints")
     csub = sp.add_subparsers(dest="cp_cmd")
     cl = csub.add_parser("list")
     cl.add_argument("--task")
@@ -641,6 +820,43 @@ def build_parser() -> argparse.ArgumentParser:
     cd.add_argument("checkpoint_id")
     cd.add_argument("--stat", action="store_true")
     sp.set_defaults(func=cmd_checkpoints, cp_cmd="list", task=None)
+
+    sp = sub.add_parser("restore", help="restore a checkpoint (the current state is checkpointed first, so it can be undone)")
+    sp.add_argument("checkpoint_id")
+    sp.set_defaults(func=cmd_restore, task=None)
+
+    sp = sub.add_parser("logs", help="show a task's activity log (latest task by default)")
+    sp.add_argument("task_id", nargs="?")
+    sp.add_argument("--limit", type=int, default=200)
+    sp.add_argument("--type", action="append", help="only these event types (repeatable), e.g. TEST_FAILED")
+    sp.add_argument("-f", "--follow", action="store_true", help="keep printing new events until the task stops")
+    sp.set_defaults(func=cmd_logs)
+
+    sp = sub.add_parser("project", help="show what the agent knows about this project, or invalidate it")
+    psub2 = sp.add_subparsers(dest="project_cmd")
+    psub2.add_parser("show")
+    psub2.add_parser("invalidate", help="drop the cached profile, code index and project memory")
+    sp.add_argument("--refresh", action="store_true", help="re-detect the repository profile")
+    sp.set_defaults(func=cmd_project, project_cmd="show")
+
+    sp = sub.add_parser("test", help="run the project's tests and checks (no model involved)")
+    sp.add_argument("files", nargs="*", help="restrict to these files where the runner supports it")
+    sp.add_argument("--kind", action="append", choices=["test", "lint", "typecheck", "build", "format", "audit", "all"],
+                    help="checks to run (repeatable; default: test, lint, typecheck)")
+    sp.add_argument("-v", "--verbose", action="store_true", help="print output of failing checks")
+    sp.add_argument("--json", action="store_true")
+    sp.set_defaults(func=cmd_test)
+
+    sp = sub.add_parser("review", help="independently review the current changes")
+    sp.add_argument("--base", help="compare the working tree with this ref (default HEAD)")
+    sp.add_argument("--staged", action="store_true", help="review only staged changes")
+    sp.add_argument("--checkpoint", help="review changes since this checkpoint")
+    sp.add_argument("--task", help="what the change is meant to do")
+    sp.add_argument("--criterion", action="append", help="acceptance criterion (repeatable)")
+    sp.add_argument("--no-model", action="store_true", help="automated checks only (result is UNVERIFIED)")
+    sp.add_argument("--json", action="store_true")
+    run_opts(sp)
+    sp.set_defaults(func=cmd_review)
 
     sp = sub.add_parser("memory", help="search and edit agent memory")
     msub = sp.add_subparsers(dest="mem_cmd")
@@ -653,6 +869,15 @@ def build_parser() -> argparse.ArgumentParser:
     ma.add_argument("--confidence", type=float, default=0.9)
     mf = msub.add_parser("forget")
     mf.add_argument("item_id")
+    mu = msub.add_parser("update", help="replace an item's content (keeps its history)")
+    mu.add_argument("item_id")
+    mu.add_argument("content", nargs="+")
+    mu.add_argument("--confidence", type=float)
+    mi = msub.add_parser("invalidate", help="flag items as stale so the repository is re-checked")
+    mi.add_argument("--layer", choices=["project", "engineering", "decision", "command", "session"])
+    mi.add_argument("--kind")
+    mi.add_argument("--id")
+    mi.add_argument("--all", action="store_true")
     mh = msub.add_parser("history")
     mh.add_argument("item_id")
     ml = msub.add_parser("list")
@@ -671,6 +896,9 @@ def build_parser() -> argparse.ArgumentParser:
     sp.set_defaults(func=cmd_providers, prov_cmd="list")
 
     sp = sub.add_parser("doctor", help="check environment, configuration and provider health")
+    sp.add_argument("--offline", action="store_true", help="skip provider connectivity checks")
+    sp.add_argument("--timeout", type=float, default=15.0, help="seconds per provider connectivity check")
+    sp.add_argument("--json", action="store_true")
     sp.set_defaults(func=cmd_doctor)
 
     sp = sub.add_parser("inspect", help="show the detected repository profile")
@@ -701,7 +929,7 @@ def build_parser() -> argparse.ArgumentParser:
     ssub.add_parser("list")
     sp.set_defaults(func=cmd_schedule, sched_cmd="list")
 
-    sp = sub.add_parser("bench", help="run the benchmark suite")
+    sp = sub.add_parser("bench", aliases=["benchmark"], help="run the benchmark suite")
     sp.add_argument("bench_cmd", nargs="?", choices=["run", "list"], default="run")
     sp.add_argument("--suite", default="harness", help="'harness' (scripted, offline) or 'model' (uses configured models)")
     sp.add_argument("--only", help="comma-separated benchmark ids")
