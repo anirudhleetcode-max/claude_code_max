@@ -27,6 +27,7 @@ from ai_engineer.tools.factory import default_tools, make_context
 from ai_engineer.tools.permissions import Decision, PermissionPolicy
 from ai_engineer.tools.process import build_env
 
+SLEEP_30 = f'"{sys.executable}" -c "import time; time.sleep(30)"'
 FAKE_TOKEN = "ghp_" + "Zz9Yy8Xx7Ww6Vv5Uu4Tt3Ss2Rr1Qq0Pp9Oo8"
 
 
@@ -120,7 +121,8 @@ async def test_safe_mode_blocks_writes_and_execution(tmp_path: Path) -> None:
     assert not (await ex.execute(call("read_file", path="a.txt"), ctx)).is_error
     assert (await ex.execute(call("write_file", path="b.txt", content="x"), ctx)).is_error
     assert (await ex.execute(call("run_command", command="python -c 'print(1)'"), ctx)).is_error
-    assert not (await ex.execute(call("run_command", command="ls"), ctx)).is_error
+    listing = "dir" if sys.platform == "win32" else "ls"
+    assert not (await ex.execute(call("run_command", command=listing), ctx)).is_error
     assert not (ws / "b.txt").exists()
 
 
@@ -154,7 +156,7 @@ async def test_tool_timeout_and_crash_are_reported(tmp_path: Path) -> None:
 async def test_cancellation_propagates(tmp_path: Path) -> None:
     ws, ctx, ex, _ = harness(tmp_path)
     ctx.cancel = CancellationToken()
-    task = asyncio.create_task(ex.execute(call("run_command", command="sleep 30"), ctx))
+    task = asyncio.create_task(ex.execute(call("run_command", command=SLEEP_30), ctx))
     await asyncio.sleep(0.3)
     ctx.cancel.cancel("user stop")
     with pytest.raises(CancelledByUser):
@@ -252,7 +254,7 @@ async def test_run_command_exit_codes_and_timeout(tmp_path: Path) -> None:
     assert not r.is_error and "hi" in r.content and "exit code 0" in r.content
     r = await ex.execute(call("run_command", command=f"{sys.executable} -c \"import sys; sys.exit(3)\""), ctx)
     assert r.is_error and "exit code 3" in r.content
-    r = await ex.execute(call("run_command", command="sleep 20", timeout_s=0.5), ctx)
+    r = await ex.execute(call("run_command", command=SLEEP_30, timeout_s=0.5), ctx)
     assert r.is_error and "timed out" in r.content
 
 

@@ -102,14 +102,30 @@ def _counts(text: str, pattern: re.Pattern[str]) -> dict[str, int]:
 
 # --- generic heuristics ---------------------------------------------------------------------------
 
-_NOT_FOUND_PATTERNS = [
-    re.compile(r"^.*?:\s*(?:line \d+:\s*)?(?:\d+:\s*)?(?P<name>[^\s:]+): (?:command )?not found\s*$", re.M),
-    re.compile(r"command not found: (?P<name>\S+)"),
-    re.compile(r"'(?P<name>[^']+)' is not recognized as an internal or external command"),
-    re.compile(r"The term '(?P<name>[^']+)' is not recognized as (?:the )?name of a cmdlet"),
-    re.compile(r"(?:npm|pnpm|yarn)(?: ERR!| error|:)? Missing script: \"?(?P<name>[\w:.-]+)\"?", re.I),
+# (needle, pattern) pairs: a pattern only runs on a bounded window around lines containing its needle
+_NOT_FOUND_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
+    ("not found", re.compile(r"^.*?:\s*(?:line \d+:\s*)?(?:\d+:\s*)?(?P<name>[^\s:]+): (?:command )?not found\s*$")),
+    ("command not found: ", re.compile(r"command not found: (?P<name>\S+)")),
+    ("is not recognized", re.compile(r"'(?P<name>[^']+)' is not recognized as an internal or external command")),
+    ("is not recognized", re.compile(r"The term '(?P<name>[^']+)' is not recognized as (?:the )?name of a cmdlet")),
+    ("issing script", re.compile(r"(?:npm|pnpm|yarn)(?: ERR!| error|:)? Missing script: \"?(?P<name>[\w:.-]+)\"?", re.I)),
 ]
-_NO_SUCH_FILE = re.compile(r"^.*?(?P<name>[^\s:\u2018\u2019'\"]+)['\u2019]?: No such file or directory\s*$", re.M)
+_NO_SUCH_FILE = ": No such file or directory"
+_WINDOW = 300
+
+
+def _windows(text: str, needle: str) -> list[str]:
+    """Short slices of the lines containing ``needle`` (keeps regex cost linear)."""
+    if needle not in text:
+        return []
+    out: list[str] = []
+    for line in text.split("\n"):
+        idx = line.find(needle)
+        if idx >= 0:
+            out.append(line[max(0, idx - _WINDOW) : idx + len(needle) + _WINDOW].strip())
+    return out
+
+
 _CANT_OPEN = re.compile(r"can't open file .*No such file or directory")
 _NO_MODULE = re.compile(r"No module named '?(?P<mod>[\w.]+)'?")
 _NODE_MISSING = re.compile(r"Cannot find (?:module|package) '(?P<mod>[^']+)'|ERR_MODULE_NOT_FOUND")
@@ -124,17 +140,21 @@ _NETWORK = re.compile(
 
 def _command_not_found(text: str, command: str) -> str:
     """The line saying the program could not be found ('' when not applicable)."""
-    for pattern in _NOT_FOUND_PATTERNS:
-        m = pattern.search(text)
-        if m:
-            return m.group(0).strip()
+    for needle, pattern in _NOT_FOUND_PATTERNS:
+        for window in _windows(text, needle):
+            if pattern.search(window):
+                return window
     exe = executable_of(command)
     exe_name = norm_program(exe) if exe else ""
-    for m in _NO_SUCH_FILE.finditer(text):
-        if exe_name and norm_program(m.group("name")) == exe_name:
-            return m.group(0).strip()
-    m2 = _CANT_OPEN.search(text)
-    return m2.group(0).strip() if m2 else ""
+    for window in _windows(text, _NO_SUCH_FILE):
+        before = window.split(_NO_SUCH_FILE, 1)[0].rstrip("'\u2019\"")
+        name = re.split(r"[\s:\u2018'\"]", before)[-1] if before else ""
+        if exe_name and name and norm_program(name) == exe_name:
+            return window
+    for window in _windows(text, "can't open file"):
+        if _CANT_OPEN.search(window):
+            return window
+    return ""
 
 
 def _looks_local(module: str, text: str) -> bool:
@@ -210,6 +230,7 @@ _FMT_CARGO = re.compile(r"^Diff in (?P<file>.+?)(?: at line (?P<line>\d+)|:(?P<l
 _FMT_ISORT = re.compile(r"^ERROR: (?P<file>.+?) Imports are incorrectly sorted")
 _GOFMT_FILE = re.compile(r"^(?P<file>[^\s:][^:\n]*\.go)\s*$")
 
+_MAX_LINE = 2000  # longer lines are never diagnostics; bounding them keeps matching cheap
 _IGNORED_LABELS = {"note", "help", "hint", "info", "warning", "error", "caused by", "debug"}
 
 
@@ -241,7 +262,7 @@ def _parse_diagnostics(text: str, *, format_mode: bool = False, gofmt: bool = Fa
             out.append(d)
 
     for raw in text.split("\n"):
-        line = raw.rstrip()
+        line = raw[:_MAX_LINE].rstrip()
         if not line.strip():
             continue
         if pending is not None:
@@ -593,12 +614,12 @@ _JEST_TESTS = re.compile(r"^Tests:\s+(?P<body>.+)$", re.M)
 _JEST_FILE = re.compile(r"^\s*(?P<st>FAIL|PASS)\s+(?P<file>\S+)(?:\s+\([\d.]+\s*m?s\))?\s*$")
 _JEST_BULLET = re.compile(r"^\s*● (?P<title>.+?)\s*$")
 _JS_STACK = re.compile(r"\(?(?P<file>(?:[A-Za-z]:)?[^\s()]+?\.(?:[cm]?[jt]sx?|vue|svelte)):(?P<line>\d+):(?P<col>\d+)\)?")
-_CODE_FRAME = re.compile(r"^\s*>?\s*\d+\s*\|")
+_CODE_FRAME = re.compile(r"^\s*(?:>\s*)?\d+\s*\|")
 
 
 def _js_location(block: list[str]) -> tuple[str | None, int | None]:
     for ln in block:
-        s = ln.strip()
+        s = ln.strip()[:500]
         if not (s.startswith(("at ", "\u276f ")) or _JS_STACK.match(s)):
             continue
         m = _JS_STACK.search(s)
